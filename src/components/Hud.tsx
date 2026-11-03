@@ -74,7 +74,11 @@ export const Hud: React.FC<HudProps> = ({ snapshot, onQuickHeal, onToggleInvento
             </div>
             <div className="w-28 h-4 bg-black/80 border-2 border-emerald-900 rounded-sm p-0.5 relative overflow-hidden shadow-md">
               <div
-                className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 rounded-[1px] transition-all duration-100"
+                className={`h-full rounded-[1px] transition-all duration-100 ${
+                  dashPercent >= 100
+                    ? 'bg-gradient-to-r from-emerald-400 to-emerald-300'
+                    : 'bg-gradient-to-r from-emerald-700 to-emerald-500'
+                }`}
                 style={{ width: `${dashPercent}%` }}
               />
             </div>

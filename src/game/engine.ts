@@ -132,6 +132,7 @@ export class GameEngine {
 
   // State synchronization listeners for React UI
   private listeners = new Set<(snapshot: GameStateSnapshot) => void>();
+  private uiSignature = '';   // last values pushed to the React HUD (see syncUi)
 
   constructor() {
     this.world = new World();
@@ -851,6 +852,26 @@ export class GameEngine {
     return this.mouseY / ZOOM + this.camera.y;
   }
 
+  // The React HUD only redraws when notify() runs, and that used to happen only on events
+  // (pickups, crafting, damage taken...). Boss HP, the dash cooldown and the flight meter change
+  // every tick without any event, so their bars froze. Call this once per tick: it pushes a
+  // fresh snapshot only when something the HUD shows has visibly changed (bars in 2% steps).
+  private syncUi(): void {
+    const boss = this.getActiveBoss();
+    const sig = [
+      Math.ceil(this.player.hp),
+      this.maxHp,
+      this.kills,
+      boss ? boss.hp + ':' + boss.maxHp + ':' + (boss.mode || '') : '-',
+      this.hasSlimeBoots ? Math.floor((this.dashCooldown * 50) / DASH_COOLDOWN) : -1,
+      this.hasWings && !this.hasInfiniteWings ? Math.floor((this.flightTime * 50) / FLIGHT_MAX) : -1,
+    ].join('|');
+    if (sig !== this.uiSignature) {
+      this.uiSignature = sig;
+      this.notify();
+    }
+  }
+
   // --- Main Tick Simulation ---
   public update(): void {
     if (this.isPaused) return;
@@ -909,6 +930,8 @@ export class GameEngine {
         this.notify();
       }
     }
+
+    this.syncUi();
   }
 
   public updatePlayer(): void {
