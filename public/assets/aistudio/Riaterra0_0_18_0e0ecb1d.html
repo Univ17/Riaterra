@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Riaterra</title>
+<style>
+:root { --bg:#dfe8f2; box-sizing:border-box;
+        padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px); }
+@media (prefers-color-scheme:dark) { :root:not([data-theme="light"]) { --bg:#10141c; } }
+:root[data-theme="dark"] { --bg:#10141c; }
+html, body { height:100%; margin:0; background:var(--bg); overflow:hidden; }
+canvas { display:block; width:100%; height:100%; cursor:crosshair; touch-action:none; }
+</style></head>
+<body><canvas id="c"></canvas>
+<script>
+// =====================================================================
+// 1. CONSTANTS AND TILE TYPES
+// =====================================================================
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const TILE = 16;            // pixels per tile
+const WORLD_W = 300;        // world width in tiles
+const WORLD_H = 110;        // world height in tiles
+const ZOOM = 2;             // screen pixels per world pixel
+
+const AIR = 0, DIRT = 1, STONE = 2, GRASS = 3, ORE = 4, WOOD = 5, LEAVES = 6;
+const PLATFORM = 7, DOOR = 8, DOOR_OPEN = 9;   // drawn specially, so no entry in TILE_COLORS
+const SILVER = 10;                              // silver ore (the existing ORE tile is the gold ore)
+const BUSH = 11;                                // berry bush: walk-through decoration that drops berries
+const TILE_COLORS = [null, '#8b5a2b', '#7a7f88', '#8b5a2b', '#7a7f88', '#6b4423', '#2e7d32'];
+TILE_COLORS[SILVER] = '#7a7f88';
+TILE_COLORS[BUSH] = '#2a6f2e';
+
+const GRAVITY = 0.3, MAX_FALL = 8;
+const REACH = TILE * 5.5;   // how far the player can mine/place
+
+const world = new Uint8Array(WORLD_W * WORLD_H);   // one byte per tile
+
+// ---- Textures: a 3x3 sheet of 16x16 sprites, embedded as base64 ----
+const sheet = new Image();
+sheet.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAC8ElEQVR42u1XzWsTQRR/GRetELSSTQIiVQi9CLmkVC0YjyII+Sd6EMRjLv4B0kuOoX+AIB48FsGDtz3UD7biTQq9lCIEWxpCL+1hx4PMOvsy3zNrVfYHS+ZjX/J7837vvUlt/OQ2TWcdWLmyByIcTU+gsVgHGT49vg4+6H57KFy/t7YGH7a3tfYEAOBW9lX6gox8OuvA0fQEyoIJeQCASEVShV8Rq8OeJ9Efh4fad5pxrI6AKco48WYcQzOOIcuyuYftMUlJI2Cqe5dImaLdajlJitjo3hZ33n7XzmUny0tM9RBRcuqkw88xqQuvLxfWZE6wT12yMnlhqbE5wYRE5RRHBM87r3ZzUrJyrIqEjbzarVZhTkJIRmSvk49OIqrE5deJSeURycr0VHWVSyYNlbz49UhXfRqLdWgYVnupvYFkdFVI2chCVZ+QZdakwUn7gA6qu5OrPb77ZFlmFBWnTuxKXmWP9W4qqUikW5tO7GtvexfCkSL4S9NZx1jLIqK29qI7EH5Ukaq9eXGf+iTbVnfBK1lfDt7XfOxJqKqxvzOB/Z0J/GnkVWhyfPo7ga5dytfYWPaOrZMAAEu9djgH3n30PLXuzeCkGMbDVQoA8Gz0WSqz6NFdvx/esjhtGycZeTaWOUHgLwRPXrU258Dk+LSgc6x7DNXeUq9dOHHTJBfJho1FTvjnwIOrwRIVk/+yOwXeifFwlWI5lZYDoojooEpW2X4UWr9lVCNlIxPpmK3Z5sR5IOJ15tMHbLQfsqGVngNldN9ScsCGYNCrhOjOw+tddxfSnTBeDx0R/z7QW4AKFf5XJElCkyRx/suZHpzR9ODM2X5jtEk3RpvU6S8lT9zFCZ64ixM8cZUTREfexQkRYRsnRIRlThAZ0X6/n9/82NjECUZ05cbF3J6NTZxgRJ8Pn+b2bKyT05zm1wfLdH2wTE1zAmse2+tyAmse24tyonCV4E9dBN0+f+ou+/ypm+6Tf71SVg5UDlQOVA6cL34CZVIYm1raLfYAAAAASUVORK5CYII=';
+// Sprite positions on the sheet as [column, row].
+const TILE_SPRITES = { [DIRT]: [0, 0], [GRASS]: [1, 0], [STONE]: [2, 0], [ORE]: [2, 0], [SILVER]: [2, 0], [WOOD]: [0, 1], [LEAVES]: [1, 1] };
+const ITEM_SPRITES = { dirt: [0, 0], stone: [2, 0], wood: [0, 1], leaves: [1, 1] };
+const PICKAXE_SPRITE = [2, 1], SILVER_PICKAXE_SPRITE = [1, 2], STONE_PICKAXE_SPRITE = [2, 2];
+const PICK_SPRITES = { pickaxe: PICKAXE_SPRITE, stone_pickaxe: STONE_PICKAXE_SPRITE, silver_pickaxe: SILVER_PICKAXE_SPRITE };
+function drawSprite(sprite, x, y, w, h) {
+  ctx.drawImage(sheet, sprite[0] * 16, sprite[1] * 16, 16, 16, x, y, w, h);
+}
+
+// Read a tile. Outside the sides/bottom counts as stone; above the world is air.
+function getTile(x, y) {
+  if (x < 0 || x >= WORLD_W || y >= WORLD_H) return STONE;
+  if (y < 0) return AIR;
+  return world[y * WORLD_W + x];
+}
+function setTile(x, y, type) { world[y * WORLD_W + x] = type; }
+
+// Solid tiles block movement. Leaves, open doors and platforms do not block
+// sideways movement or bullets (platforms are handled separately in moveBody).
+function isSolid(x, y) {
+  const t = getTile(x, y);
+  return t !== AIR && t !== LEAVES && t !== PLATFORM && t !== DOOR_OPEN && t !== BUSH;
+}
+
+// =====================================================================
+// 2. WORLD GENERATION
+// =====================================================================
+const seed = Math.random() * 1000;
+
+// Pseudo-random number in [0,1) for a grid point, stable for a given seed.
+function hash(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7 + seed) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+// Smooth "value noise": blends the hashes of the 4 surrounding grid points.
+function valueNoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const fx = x - xi, fy = y - yi;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);   // smoothstep
+  const top    = hash(xi, yi)     * (1 - u) + hash(xi + 1, yi)     * u;
+  const bottom = hash(xi, yi + 1) * (1 - u) + hash(xi + 1, yi + 1) * u;
+  return top * (1 - v) + bottom * v;
+}
+
+// Surface height (in tiles from the top) for each column: layered sine waves.
+const surface = [];
+for (let x = 0; x < WORLD_W; x++) {
+  surface[x] = Math.floor(40 + 8 * Math.sin(x * 0.05 + seed)
+                             + 5 * Math.sin(x * 0.13 + 2)
+                             + 3 * Math.sin(x * 0.31));
+}
+
+function generateTerrain() {
+  for (let x = 0; x < WORLD_W; x++) {
+    const top = surface[x];
+    for (let y = top; y < WORLD_H; y++) {
+      // Grass on top, then a few tiles of dirt, then stone.
+      let tile;
+      if (y === top) tile = GRASS;
+      else if (y < top + 6 + hash(x, 7) * 3) tile = DIRT;
+      else tile = STONE;
+
+      // Caves: carve out air where noise is high, but not near the surface.
+      if (y > top + 5) {
+        const n = valueNoise(x / 8, y / 8) * 0.67 + valueNoise(x / 4, y / 4) * 0.33;
+        if (n > 0.62) tile = AIR;
+      }
+      // Ore: rare random speckles inside stone (gold is rarer than silver).
+      if (tile === STONE) {
+        if (hash(x, y) < 0.03) tile = ORE;
+        else if (hash(x + 211, y + 97) < 0.04) tile = SILVER;
+      }
+      // Solid floor at the bottom of the world.
+      if (y >= WORLD_H - 2) tile = STONE;
+
+      setTile(x, y, tile);
+    }
+  }
+}
+
+function generateTrees() {
+  for (let x = 4; x < WORLD_W - 4; x++) {
+    const onGrass = getTile(x, surface[x]) === GRASS;
+    if (!onGrass || hash(x, 99) >= 0.09) continue;
+
+    const height = 3 + Math.floor(hash(x, 5) * 3);
+    const treeTop = surface[x] - height;
+    for (let y = surface[x] - 1; y >= treeTop; y--) setTile(x, y, WOOD);        // trunk
+    for (let dy = -2; dy <= 1; dy++) {                                          // leaf blob
+      for (let dx = -2; dx <= 2; dx++) {
+        const tx = x + dx, ty = treeTop + dy;
+        if (getTile(tx, ty) === AIR && Math.abs(dx) + Math.abs(dy) < 4) setTile(tx, ty, LEAVES);
+      }
+    }
+    x += 3;   // leave a gap before the next tree
+  }
+}
+
+// Berry bushes: small bushes on open grass (never on a tree trunk).
+function generateBushes() {
+  for (let x = 2; x < WORLD_W - 2; x++) {
+    const y = surface[x] - 1;
+    if (getTile(x, surface[x]) === GRASS && getTile(x, y) === AIR && hash(x, 321) < 0.12) setTile(x, y, BUSH);
+  }
+}
+
+generateTerrain();
+generateTrees();
+generateBushes();
+
+// =====================================================================
+// 3. GAME STATE
+// =====================================================================
+const SPAWN_X = (WORLD_W / 2) * TILE;
+const SPAWN_Y = (surface[WORLD_W / 2] - 3) * TILE;
+
+const player = {
+  x: SPAWN_X, y: SPAWN_Y, w: 12, h: 26,
+  vx: 0, vy: 0,
+  hp: 100, facing: 1,
+  invincibleFrames: 0,   // brief immunity after being hit
+  dropFrames: 0,         // while > 0, fall through platforms
+  onGround: false,
+};
+
+let enemies = [];
+let bullets = [];
+let angelSwords = [];         // swords thrown by the Descendant (fly through blocks)
+let slimeBalls = [];          // projectiles shot by the boss
+let maxHp = 100;              // raised by defeating the Big Bad Eye
+let hasBetterGun = false;     // Slime Gun (dropped by Slime King)
+let hasBossSword = false;     // Big Bad Sword (dropped by Big Bad Eye)
+let slimeKingDefeated = false;// Tracks if the Slime King has been slain
+let hasWings = false;         // crafted from 4 angel tears: hold jump in the air to fly
+let hasInfiniteWings = false; // crafted from 4 God's Tears (dropped by purple eyelets)
+let eyeDefeated = false;      // set when the Big Bad Eye dies; purple eyelets only spawn after that
+const FLIGHT_MAX = 180;       // 3 seconds of flight, refilled when you touch the ground
+let flightTime = FLIGHT_MAX, wingsArmed = false;
+let hasSlimeBoots = false;    // crafted from 10 gel: Shift dashes the way you are facing
+const DASH_SPEED = 10, DASH_FRAMES = 16, DASH_COOLDOWN = 180;   // 10 px x 16 frames = 160 px = 10 tiles
+let dashFrames = 0, dashCooldown = 0, dashDir = 1, dashWasDown = false, dashEndPending = false, dashTrail = [];
+
+// ---- Items and inventory ----
+// Every item the player can hold. Items with a `tile` can be placed in the world.
+const ITEMS = {
+  sword:    { name: 'Sword',    color: '#ccd' },
+gun:      { name: 'Gun',      color: '#777', crafted: true },
+  pickaxe:  { name: 'Wood Pick', color: '#bbb', pick: 0 },
+  stone_pickaxe:  { name: 'Stone Pick',  color: '#889', pick: 1, crafted: true },
+  silver_pickaxe: { name: 'Silver Pick', color: '#cde', pick: 2, crafted: true },
+  silver_sword:   { name: 'Silver Sword', slot: 'S. Sword', color: '#cde', crafted: true },   // crafted from 8 silver + 2 wood
+  dirt:     { name: 'Dirt',     color: '#8b5a2b', tile: DIRT },
+  stone:    { name: 'Stone',    color: '#7a7f88', tile: STONE },
+  ore:      { name: 'Gold',     color: '#f0c040', tile: ORE },
+  silver:   { name: 'Silver',   color: '#d6dde6', counted: true },   // material only: used for crafting
+  artefact: { name: 'Artefact', color: '#6df',    counted: true },   // dropped by eyelets; craft it with the gun
+  berry:    { name: 'Berry',    color: '#c2185b', counted: true },   // picked from berry bushes; 3 craft a potion
+  angel_tear: { name: "Angel's Tear", slot: 'Tear', color: '#bfe6ff', counted: true },   // dropped by eyelets; 4 craft the Wings
+  god_tear: { name: "God's Tear", slot: 'G. Tear', color: '#e9c8ff', counted: true },   // dropped by purple eyelets; 4 craft the Infinite Wings
+  ancient_artefact: { name: 'Ancient Artefact', slot: 'Anc. Art.', color: '#ffd24a', counted: true },   // dropped by golden eyelets; 3 craft the Descendant Sigil
+  sigil:    { name: 'Descendant Sigil', slot: 'Sigil', color: '#fff0b3', counted: true },               // click it to summon the Descendant
+  gel:      { name: 'Gel',      color: '#3ecf8e', counted: true },   // dropped by slimes; 10 craft the Slime Boots
+  wood:     { name: 'Wood',     color: '#6b4423', tile: WOOD },
+  leaves:   { name: 'Leaves',   color: '#2e7d32', tile: LEAVES },
+  platform: { name: 'Platform', color: '#a0693a', tile: PLATFORM },
+  door:     { name: 'Door',     color: '#a0693a', tile: DOOR },
+  book:     { name: 'Book',     color: '#8a2be2', counted: true },   // summons the Big Bad Eye
+  potion:   { name: 'Potion',   color: '#e33', counted: true },      // heals 50 health
+  honza:    { name: 'Honza',    color: '#3ecf8e', crafted: true }, // crazy ass dev gun
+};
+const ITEM_ORDER = Object.keys(ITEMS);
+const inventory = { dirt: 40, platform: 20, door: 4, potion: 5 };   // item id -> count (materials only)
+const hotbar = ['sword', 'pickaxe', null, null, null, null, null, null, null, null];
+const HOTBAR_SIZE = hotbar.length;
+let selectedSlot = 0;
+let inventoryOpen = false;
+
+let toastText = '', toastFrames = 0;   // short centered message
+function showToast(text) { toastText = text; toastFrames = 150; }
+
+const heldItem = () => hotbar[selectedSlot];
+const isPlaceable = id => !!(id && ITEMS[id].tile);
+const itemCount = id => inventory[id] || 0;
+function itemName(id) {
+  if (id === 'sword' && hasBossSword) return 'Big Bad Sword';
+  if (id === 'gun' && hasBetterGun) return 'Slime Gun';
+  return ITEMS[id].name;
+}
+
+// Add collected materials; a new material goes into the first empty hotbar slot.
+function addItem(id, n = 1) {
+  inventory[id] = itemCount(id) + n;
+  if (!hotbar.includes(id)) {
+    const free = hotbar.indexOf(null);
+    if (free >= 0) hotbar[free] = id;
+  }
+}
+
+// What a tile gives you when mined.
+function dropFor(tile) {
+  return { [DIRT]: 'dirt', [GRASS]: 'dirt', [STONE]: 'stone', [ORE]: 'ore', [SILVER]: 'silver', [WOOD]: 'wood',
+           [LEAVES]: 'leaves', [PLATFORM]: 'platform', [DOOR]: 'door', [DOOR_OPEN]: 'door', [BUSH]: 'berry' }[tile];
+}
+
+// ---- Crafting (Terraria style) ----
+// Recipes show up in the inventory panel (E): hover one to see its ingredients, click to craft it
+// (Shift+click crafts as many as you can afford). Recipes you can afford light up green.
+// Tools and the Rifle can only be crafted once; platforms and potions can be crafted again and again.
+//   cost:  ingredients (item id -> amount)      gives: how many items one craft makes
+//   done() (optional): true once a one-time recipe is already crafted
+//   make(): hands over the result
+function upgradeTool(newId, oldId) {                // new tool takes over the old tool's hotbar slot
+  inventory[newId] = 1;
+  const slot = hotbar.indexOf(oldId);
+  if (slot >= 0) hotbar[slot] = newId; else addItem(newId);
+}
+const RECIPES = [
+  { icon: 'stone_pickaxe',  label: 'Stone Pick',  name: 'Stone Pickaxe',  cost: { wood: 2, stone: 8 },
+    done: () => itemCount('stone_pickaxe') > 0,  make: () => upgradeTool('stone_pickaxe', 'pickaxe') },
+  { icon: 'silver_pickaxe', label: 'Silver Pick', name: 'Silver Pickaxe', cost: { wood: 2, silver: 8 },
+    done: () => itemCount('silver_pickaxe') > 0, make: () => upgradeTool('silver_pickaxe', 'stone_pickaxe') },
+  { icon: 'silver_sword',   label: 'S. Sword',    name: 'Silver Sword',   cost: { wood: 2, silver: 8 }, desc: 'Deals 28 damage',
+    done: () => itemCount('silver_sword') > 0,   make: () => addItem('silver_sword') },
+  { icon: 'platform',       label: 'Platform',    name: 'Platform',       cost: { wood: 1 },   gives: 2,
+    make: () => addItem('platform', 2) },
+  { icon: 'potion',         label: 'Potion',      name: 'Health Potion',  cost: { berry: 3 },  gives: 1,
+    make: () => addItem('potion') },
+  { icon: 'gun', label: 'Gun', name: 'Gun', cost: { ore: 10, silver: 5 }, color: '#777',
+    desc: 'Fires bullets towards your cursor',
+    done: () => itemCount('gun') > 0 || hasBetterGun,
+    make: () => addItem('gun') },
+  { icon: 'wings',          label: 'Wings',       name: 'Wings',          cost: { angel_tear: 4 }, color: '#f4f4ff',
+    desc: 'Let go of jump in the air, then hold it to fly',
+    toast: 'Crafted Wings!\nLet go of jump in the air, then hold it to fly.',
+    done: () => hasWings,                        make: () => { hasWings = true; } },
+  { icon: 'god_tear',       label: 'Inf Wings',   name: 'Infinite Wings', cost: { god_tear: 4 }, color: '#c77dff',
+    desc: 'Upgrades your Wings: unlimited flight',
+    toast: 'Crafted Infinite Wings!\nYour wings now have unlimited flight.',
+    done: () => hasInfiniteWings,               make: () => { hasInfiniteWings = true; } },
+  { icon: 'boots',          label: 'Boots',       name: 'Slime Boots',    cost: { gel: 10 }, color: '#3ecf8e',
+    desc: 'Press Shift to dash the way you are facing',
+    toast: 'Crafted Slime Boots!\nPress Shift to dash the way you are facing.',
+    done: () => hasSlimeBoots,                   make: () => { hasSlimeBoots = true; } },
+  { icon: 'sigil',          label: 'Sigil',       name: 'Descendant Sigil', cost: { ancient_artefact: 3 }, gives: 1, color: '#fff0b3',
+    desc: 'Click it to summon the Descendant',
+    toast: 'Crafted the Descendant Sigil!\nClick with it to summon the Descendant.',
+    make: () => addItem('sigil') },
+];
+
+// ---- Debug Menu Actions ----
+let debugOpen = false;   // the debug buttons stay hidden until the Debug button in the inventory is clicked
+const DEBUG_ACTIONS = [
+  { label: 'Inf Wings', action: () => { hasWings = true; hasInfiniteWings = true; showToast('Infinite Wings granted!'); } },
+  { label: 'Best Sword', action: () => { hasBossSword = true; addItem('sword'); showToast('Big Bad Sword unlocked!'); } },
+  { label: 'Best Gun', action: () => { hasBetterGun = true; addItem('gun'); showToast('Slime Gun unlocked!'); } },
+  { label: 'Honza', action: () => { addItem('honza'); showToast('Honza unlocked!'); } },
+  { label: 'Spawn Slime', action: () => { spawnBoss(player.x, player.y - 60); } },
+  { label: 'Spawn Eye', action: () => {
+    enemies.push({ kind: 'eye', x: player.x - 20, y: player.y - 260, w: 40, h: 40, vx: 0, vy: 0, hp: 5000, maxHp: 5000, damage: 25, state: 'hover', timer: 120, dashes: 0, t: 0 });
+    showToast('Big Bad Eye spawned!');
+  }},
+  { label: 'Descendant', action: () => { spawnDescendant(); } },
+  { label: 'Full Heal', action: () => { player.hp = maxHp; showToast('Health restored!'); } },
+  { label: '+50 Max HP', action: () => { maxHp += 50; player.hp = maxHp; showToast('Max HP: ' + maxHp); } },
+  { label: 'Set 500 HP', action: () => { maxHp = 500; player.hp = 500; showToast('HP set to 500!'); } },
+  { label: 'Best Pick', action: () => {
+    if (!hotbar.includes('silver_pickaxe')) upgradeTool('silver_pickaxe', hotbar.includes('stone_pickaxe') ? 'stone_pickaxe' : 'pickaxe');
+    showToast('Silver Pickaxe unlocked!');
+  }},
+  { label: '+100 Platforms', action: () => { addItem('platform', 100); showToast('+100 Platforms'); } },
+  { label: 'Slime Boots', action: () => { hasSlimeBoots = true; showToast('Slime Boots granted!\nPress Shift to dash the way you are facing.'); } },
+];
+
+const isDone = r => !!(r.done && r.done());
+const canCraft = r => !isDone(r) && Object.entries(r.cost).every(([id, n]) => itemCount(id) >= n);
+function craft(r, all = false) {
+  if (!canCraft(r)) return;
+  let made = 0;
+  while (canCraft(r)) {                                       // `all` (Shift+click) keeps going until the materials run out
+    for (const [id, n] of Object.entries(r.cost)) inventory[id] -= n;
+    r.make();
+    made += r.gives || 1;
+    if (!all) break;
+  }
+  showToast(r.toast || ('Crafted ' + r.name + (made > 1 ? ' x' + made : '') + '!'));
+}
+let cooldown = 0;           // frames until the next use is allowed
+let swingFrames = 0;        // frames left in the current sword swing
+let swingAlreadyHit = new Set();   // enemies hit during this swing
+let swingItem = 'sword';           // which sword started the current swing
+let kills = 0;
+let spawnTimer = 60;
+let mining = { x: -1, y: -1, progress: 0, need: 1 };
+
+const camera = { x: 0, y: 0 };
+let viewW = 0, viewH = 0;   // visible area in world pixels
+
+// =====================================================================
+// 4. INPUT
+// =====================================================================
+const keys = {};
+// Hotbar slots 1-10 are the Czech number row: + ě š č ř ž ý á í é
+const CZ_SLOT_KEYS = ['+', 'ě', 'š', 'č', 'ř', 'ž', 'ý', 'á', 'í', 'é'];
+let mouseX = 0, mouseY = 0;          // screen pixels
+const UI_SCALE = 1.5;                // HUD and inventory are drawn 50% bigger
+let uiDrag = null;                   // {dx, dy} while the inventory panel is being dragged
+let panelOffX = 0, panelOffY = 0;    // how far the player has dragged the inventory panel
+const uiW = () => canvas.width / UI_SCALE, uiH = () => canvas.height / UI_SCALE;   // screen size in UI units
+const uiMX = () => mouseX / UI_SCALE, uiMY = () => mouseY / UI_SCALE;              // mouse in UI units
+let leftDown = false, rightDown = false;
+
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  const czSlot = CZ_SLOT_KEYS.indexOf(e.key.toLowerCase());
+  if (czSlot >= 0) selectedSlot = czSlot;
+  else if (/^Digit\d$/.test(e.code)) selectedSlot = (Number(e.code.slice(5)) + 9) % 10;   // same physical keys (also works with Caps Lock)
+  if (e.key === 'Escape') { inventoryOpen = false; carry = null; }
+  if (e.key.toLowerCase() === 'h' && !e.repeat && !inventoryOpen) usePotion();   // quick heal
+  if ((e.key.toLowerCase() === 'e' || e.key === 'Tab') && !e.repeat) {          // toggle inventory
+    inventoryOpen = !inventoryOpen;
+    carry = null;
+    leftDown = rightDown = false;
+    e.preventDefault();
+  }
+  if (e.key === ' ') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseX = e.clientX - r.left;
+  mouseY = e.clientY - r.top;
+  if (uiDrag) {                                       // dragging the inventory panel
+    panelOffX = uiMX() - uiDrag.dx;
+    panelOffY = uiMY() - uiDrag.dy;
+    clampPanel();
+  }
+});
+canvas.addEventListener('mousedown', e => {
+  if (inventoryOpen) { if (e.button === 0) clickInventory(e.shiftKey); return; }   // clicks go to the panel
+  if (e.button === 0) leftDown = true; else rightDown = true;
+});
+addEventListener('mouseup',          e => { if (e.button === 0) { leftDown = false; uiDrag = null; if (inventoryOpen) releaseInventory(); } else rightDown = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+  selectedSlot = (selectedSlot + (e.deltaY > 0 ? 1 : HOTBAR_SIZE - 1)) % HOTBAR_SIZE;
+}, { passive: true });
+
+// Mouse position converted to world coordinates.
+const mouseWorldX = () => mouseX / ZOOM + camera.x;
+const mouseWorldY = () => mouseY / ZOOM + camera.y;
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  canvas.width = r.width;
+  canvas.height = r.height;
+  viewW = canvas.width / ZOOM;
+  viewH = canvas.height / ZOOM;
+}
+addEventListener('resize', resize);
+resize();
+
+// =====================================================================
+// 5. PHYSICS (shared by the player and enemies)
+// =====================================================================
+// Does this body overlap any solid tile?
+function collides(body) {
+  const x0 = Math.floor(body.x / TILE);
+  const x1 = Math.floor((body.x + body.w - 0.01) / TILE);
+  const y0 = Math.floor(body.y / TILE);
+  const y1 = Math.floor((body.y + body.h - 0.01) / TILE);
+  for (let y = y0; y <= y1; y++)
+    for (let x = x0; x <= x1; x++)
+      if (isSolid(x, y)) return true;
+  return false;
+}
+
+// Move horizontally, then vertically. On a collision, back out in small steps.
+function moveBody(body) {
+  body.onGround = false;
+  body.blockedSideways = false;
+
+  body.x += body.vx;
+  if (body.vx && collides(body)) {
+    const dir = Math.sign(body.vx);
+    while (collides(body)) body.x -= dir * 0.25;
+    body.vx = 0;
+    body.blockedSideways = true;
+  }
+
+  const prevBottom = body.y + body.h;
+  body.y += body.vy;
+  if (body.vy && collides(body)) {
+    const dir = Math.sign(body.vy);
+    while (collides(body)) body.y -= dir * 0.25;
+    if (dir > 0) body.onGround = true;   // landed on something
+    body.vy = 0;
+  }
+  landOnPlatform(body, prevBottom);
+}
+
+// Platforms are one-way: you can jump up through them, but you land on top
+// when falling, unless dropFrames > 0 (player is holding S/Down).
+function landOnPlatform(body, prevBottom) {
+  if (body.vy <= 0 || body.dropFrames > 0) return;
+  const row = Math.floor((body.y + body.h) / TILE);
+  if (row * TILE < prevBottom - 0.5) return;   // feet were already below the platform top
+  const x0 = Math.floor(body.x / TILE);
+  const x1 = Math.floor((body.x + body.w - 0.01) / TILE);
+  for (let x = x0; x <= x1; x++) {
+    if (getTile(x, row) === PLATFORM) {
+      body.y = row * TILE - body.h;
+      body.vy = 0;
+      body.onGround = true;
+      return;
+    }
+  }
+}
+
+// =====================================================================
+// 6. ITEMS: SWORD, GUN, PICKAXE, BLOCKS
+// =====================================================================
+function useItem() {
+  if (cooldown > 0) return;
+  const px = player.x + player.w / 2, py = player.y + 8;
+  const aimX = mouseWorldX() - px, aimY = mouseWorldY() - py;
+  const aimLen = Math.hypot(aimX, aimY) || 1;
+  player.facing = aimX >= 0 ? 1 : -1;
+
+  const item = heldItem();
+  if (item === 'sword' || item === 'silver_sword') {   // SWORD: start a swing
+    swingItem = item;
+    swingFrames = 14;
+    swingAlreadyHit.clear();
+    cooldown = 18;
+  } else if (item === 'gun') {                 // GUN: fire a bullet toward the mouse
+    bullets.push({ x: px, y: py, vx: aimX / aimLen * (hasBetterGun ? 12 : 9), vy: aimY / aimLen * (hasBetterGun ? 12 : 9), life: 70 });
+    cooldown = hasBetterGun ? 14 : 24;
+  } else if (item === 'gun' || item === 'honza') {   // dev gun
+    bullets.push({ x: px, y: py, vx: aimX / aimLen * 12, vy: aimY / aimLen * 12, life: 70, honza: item === 'honza' });
+    cooldown = 14;
+  } else if (item && ITEMS[item].pick !== undefined) {   // PICKAXES: mine the tile under the mouse
+    mineTile(ITEMS[item].pick);
+  } else if (item === 'book') {                // OCCULT BOOK: summon the Big Bad Eye
+    useBook();
+  } else if (item === 'sigil') {               // DESCENDANT SIGIL: summon the Descendant
+    useSigil();
+  } else if (item === 'potion') {              // HEALING POTION
+    usePotion();
+  } else {                                     // any material: place it (does nothing on an empty slot)
+    placeItem(item);
+  }
+}
+
+// ---- Block breaking animation: cracks that grow as you dig, plus flying debris ----
+// A fixed crack pattern (a list of pixels, ordered from the middle outward). The more
+// progress you have made, the more of the list is drawn.
+const CRACK_PIXELS = (() => {
+  let r = 12345;
+  const rnd = () => (r = (r * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const seen = new Set(), out = [];
+  const add = (x, y) => {
+    if (x < 0 || y < 0 || x >= TILE || y >= TILE || seen.has(x + ',' + y)) return false;
+    seen.add(x + ',' + y); out.push([x, y]); return true;
+  };
+  const branches = [];
+  for (let b = 0; b < 7; b++) {                       // each branch is a wobbly line leaving the centre
+    const ang = (b / 7) * Math.PI * 2 + rnd() * 0.6;
+    branches.push({ x: 7.5, y: 7.5, ang, len: 6 + Math.floor(rnd() * 4) });
+  }
+  for (let step = 0; step < 10; step++) {              // grow all branches one step at a time
+    for (const br of branches) {
+      if (step >= br.len) continue;
+      br.ang += (rnd() - 0.5) * 0.9;
+      br.x += Math.cos(br.ang); br.y += Math.sin(br.ang);
+      add(Math.round(br.x), Math.round(br.y));
+      if (rnd() < 0.25) add(Math.round(br.x) + (rnd() < 0.5 ? 1 : 0), Math.round(br.y));   // slightly thicker in places
+    }
+  }
+  add(7, 7); add(8, 7); add(7, 8); add(8, 8);
+  out.unshift(out.pop(), out.pop(), out.pop(), out.pop());   // the centre goes first
+  return out;
+})();
+
+function drawBreakCracks() {
+  if (!leftDown || mining.progress <= 0 || getTile(mining.x, mining.y) === AIR) return;
+  const frac = Math.min(1, mining.progress / mining.need);
+  const stage = Math.min(9, Math.floor(frac * 10));            // 10 stages, like Minecraft
+  const px = mining.x * TILE, py = mining.y * TILE;
+  ctx.fillStyle = 'rgba(0,0,0,' + (0.08 + frac * 0.22) + ')';   // the block darkens as it weakens
+  ctx.fillRect(px, py, TILE, TILE);
+  const count = Math.ceil(CRACK_PIXELS.length * (stage + 1) / 10);
+  for (let i = 0; i < count; i++) {
+    const [cx, cy] = CRACK_PIXELS[i];
+    ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(px + cx, py + cy, 1, 1);
+    if (i % 3 === 0) { ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(px + cx + 1, py + cy + 1, 1, 1); }   // faint highlight edge
+  }
+}
+
+let debris = [];
+const DEBRIS_COLORS = {
+  [DIRT]: ['#8b5a2b', '#6e4520', '#a06a35'], [GRASS]: ['#4caf50', '#3d8c40', '#8b5a2b'],
+  [STONE]: ['#7a7f88', '#5f646c', '#969ba3'], [ORE]: ['#7a7f88', '#f0c040', '#5f646c'],
+  [SILVER]: ['#7a7f88', '#e8f0fa', '#5f646c'], [WOOD]: ['#6b4423', '#523318', '#85572d'],
+  [LEAVES]: ['#2e7d32', '#1f5d23', '#43a047'], [BUSH]: ['#2a6f2e', '#c2185b', '#1f5d23'],
+  [PLATFORM]: ['#9b6a3a', '#7a4f26'], [DOOR]: ['#9b6a3a', '#7a4f26'], [DOOR_OPEN]: ['#9b6a3a', '#7a4f26'],
+};
+function spawnDebris(tx, ty, type, n) {
+  const cols = DEBRIS_COLORS[type] || ['#8b5a2b'];
+  for (let i = 0; i < n; i++) {
+    debris.push({
+      x: tx * TILE + 2 + Math.random() * (TILE - 4), y: ty * TILE + 2 + Math.random() * (TILE - 4),
+      vx: (Math.random() - 0.5) * (n > 1 ? 3 : 1.6), vy: -Math.random() * (n > 1 ? 3 : 1.8) - 0.3,
+      size: Math.random() < 0.5 ? 2 : 3, life: 24 + Math.floor(Math.random() * 16),
+      color: cols[Math.floor(Math.random() * cols.length)],
+    });
+  }
+  if (debris.length > 300) debris.splice(0, debris.length - 300);
+}
+function updateDebris() {
+  for (const d of debris) {
+    d.vy += 0.2; d.x += d.vx; d.y += d.vy; d.vx *= 0.98; d.life--;
+    if (isSolid(Math.floor(d.x / TILE), Math.floor((d.y + d.vy) / TILE)) && d.vy > 0) { d.vy *= -0.3; d.vx *= 0.6; }   // bounce on blocks
+  }
+  debris = debris.filter(d => d.life > 0);
+}
+function drawDebris() {
+  for (const d of debris) {
+    ctx.globalAlpha = Math.min(1, d.life / 10);
+    ctx.fillStyle = d.color; ctx.fillRect(Math.round(d.x), Math.round(d.y), d.size, d.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Pickaxe power: 0 = starting pick, 1 = stone pick, 2 = silver pick.
+// Frames needed per tile for [power 0, 1, 2]; null means that pickaxe can't break it.
+const MINE_FRAMES = {
+  soft:   [12, 8, 6],          // dirt, wood, leaves, platforms, doors...
+  [STONE]:  [20, 14, 10],      // the wood pick can mine stone too, just slower
+  [SILVER]: [null, 20, 12],    // needs at least a stone pickaxe
+  [ORE]:    [null, null, 14],  // gold ore needs a silver pickaxe
+  [BUSH]:   [4, 3, 2],        // berry bushes are quick to pick
+};
+const NEEDS_TOAST = { [SILVER]: 'Silver ore needs a stone pickaxe', [ORE]: 'Gold ore needs a silver pickaxe' };
+
+function mineTile(power) {
+  const tx = Math.floor(mouseWorldX() / TILE), ty = Math.floor(mouseWorldY() / TILE);
+  const px = player.x + player.w / 2, py = player.y + 8;
+  const inReach = Math.hypot(tx * TILE + 8 - px, ty * TILE + 8 - py) < REACH;
+  if (!inReach || getTile(tx, ty) === AIR) return;
+  const type = getTile(tx, ty);
+
+  const framesNeeded = (MINE_FRAMES[type] || MINE_FRAMES.soft)[power];
+  if (framesNeeded === null) {                       // this pickaxe is too weak for the tile
+    if (toastFrames <= 0) showToast(NEEDS_TOAST[type]);
+    return;
+  }
+
+  // Restart progress when aiming at a new tile.
+  if (mining.x !== tx || mining.y !== ty) mining = { x: tx, y: ty, progress: 0, need: framesNeeded };
+  mining.need = framesNeeded;
+  mining.progress++;
+  if (mining.progress % 4 === 1) spawnDebris(tx, ty, type, 1);   // small chips fly off while you dig
+  if (mining.progress < framesNeeded) return;
+  mining.progress = 0;
+  spawnDebris(tx, ty, type, 12);                                  // burst when the block breaks
+
+  // Break the tile and collect what it drops.
+  if (isDoorTile(type)) removeDoor(tx, ty);
+  else setTile(tx, ty, AIR);
+  addItem(dropFor(type), type === BUSH ? 1 + (Math.random() < 0.5 ? 1 : 0) : 1);   // a bush gives 2-3 berries; trees give only wood now
+}
+
+// Place a material (dirt, stone, ore, wood, leaves, platform or door) under the mouse.
+function placeItem(id) {
+  const tx = Math.floor(mouseWorldX() / TILE), ty = Math.floor(mouseWorldY() / TILE);
+  if (!isPlaceable(id) || itemCount(id) < 1 || ty < 2 || !mouseInReach(tx, ty)) return;
+
+  // Doors are 2 tiles tall: the clicked tile is the bottom half.
+  const cells = id === 'door' ? [[tx, ty], [tx, ty - 1]] : [[tx, ty]];
+  const type = ITEMS[id].tile;
+  if (cells.some(([x, y]) => getTile(x, y) !== AIR)) return;
+
+  cells.forEach(([x, y]) => setTile(x, y, type));
+  if (collides(player)) {                                    // don't entomb the player
+    cells.forEach(([x, y]) => setTile(x, y, AIR));
+    return;
+  }
+  inventory[id]--;
+  cooldown = 5;
+  if (id === 'ore') checkBossSummon(tx, ty);
+}
+
+function mouseInReach(tx, ty) {
+  const px = player.x + player.w / 2, py = player.y + 8;
+  return Math.hypot(tx * TILE + 8 - px, ty * TILE + 8 - py) <= REACH;
+}
+
+// Right-click: open/close a door under the mouse, otherwise place the selected
+// placeable (blocks if a weapon or the pickaxe is selected).
+function rightClick() {
+  const tx = Math.floor(mouseWorldX() / TILE), ty = Math.floor(mouseWorldY() / TILE);
+  if (isDoorTile(getTile(tx, ty)) && mouseInReach(tx, ty)) {
+    if (cooldown <= 0) { toggleDoor(tx, ty); cooldown = 15; }
+    return;
+  }
+  placeItem(isPlaceable(heldItem()) ? heldItem() : 'dirt');
+}
+
+// ---- Doors ----
+const isDoorTile = t => t === DOOR || t === DOOR_OPEN;
+
+// A door is a vertical stack of door tiles; run fn(tileY) on each one.
+function forEachDoorTile(x, y, fn) {
+  let top = y;
+  while (isDoorTile(getTile(x, top - 1))) top--;
+  for (let ty = top; isDoorTile(getTile(x, ty)); ty++) fn(ty);
+}
+function removeDoor(x, y) { forEachDoorTile(x, y, ty => setTile(x, ty, AIR)); }
+function toggleDoor(x, y) {
+  const closing = getTile(x, y) === DOOR_OPEN;
+  const next = closing ? DOOR : DOOR_OPEN;
+  forEachDoorTile(x, y, ty => setTile(x, ty, next));
+  if (closing && collides(player)) {                         // can't close on the player
+    forEachDoorTile(x, y, ty => setTile(x, ty, DOOR_OPEN));
+  }
+}
+
+// =====================================================================
+// 7. ENEMIES
+// =====================================================================
+// Try to spawn an enemy 20-35 tiles to the side of the player, standing on solid ground.
+function spawnEnemy() {
+// Flyers start spawning after the Slime King is killed
+  const flyerCount = enemies.filter(e => e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet').length;
+  if (slimeKingDefeated && Math.random() < 0.25 && flyerCount < 4) {
+    if (eyeDefeated && hasInfiniteWings && Math.random() < 0.10) {        // after the Infinite Wings: golden eyelets (rare) replace purple ones
+      spawnGoldenEyelet();
+    } else if (eyeDefeated && !hasInfiniteWings && Math.random() < 0.3) {
+      spawnPurpleEyelet();
+    } else {
+      spawnEyelet();
+
+    }
+    return;
+  }
+  const playerTileX = Math.floor(player.x / TILE), playerTileY = Math.floor(player.y / TILE);
+  const side = Math.random() < 0.5 ? -1 : 1;
+  const tx = playerTileX + side * (20 + Math.floor(Math.random() * 15));
+  if (tx < 2 || tx > WORLD_W - 3) return;
+
+  for (let ty = playerTileY - 15; ty < playerTileY + 15; ty++) {
+    const roomAbove = getTile(tx, ty) === AIR && getTile(tx, ty - 1) === AIR && getTile(tx, ty - 2) === AIR;
+    const ground = isSolid(tx, ty + 1);
+    if (!roomAbove || !ground) continue;
+
+    const roll = Math.random();
+    if (roll < 0.35) {           // zombie: tall, walks toward you
+      enemies.push({ kind: 'zombie', x: tx * TILE, y: (ty - 1) * TILE, w: 12, h: 26,
+                     vx: 0, vy: 0, hp: 50, maxHp: 50, damage: 15, hopTimer: 0 });
+    } else if (roll < 0.6) {     // green slime: tougher than the blue one
+      enemies.push({ kind: 'green', x: tx * TILE, y: (ty + 1) * TILE - 14, w: 16, h: 14,
+                     vx: 0, vy: 0, hp: 40, maxHp: 40, damage: 12, hopTimer: 30 });
+    } else {                     // blue slime: short, hops toward you
+      enemies.push({ kind: 'slime', x: tx * TILE, y: (ty + 1) * TILE - 12, w: 14, h: 12,
+                     vx: 0, vy: 0, hp: 30, maxHp: 30, damage: 10, hopTimer: 30 });
+    }
+    return;
+  }
+}
+
+// ---- Boss ----
+// Five ore blocks in an upside-down T (a bar of 3 with a stem of 2 going up) summon it.
+// Checked every time you place an ore block.
+function checkBossSummon(tx, ty) {
+  if (enemies.some(e => e.kind === 'boss')) return;        // only one at a time
+  for (let cx = tx - 1; cx <= tx + 1; cx++) {
+    for (let cy = ty; cy <= ty + 2; cy++) {                // (cx, cy) = bottom-center of the T
+      const cells = [[cx - 1, cy], [cx, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy - 2]];
+      if (!cells.every(([x, y]) => getTile(x, y) === ORE)) continue;
+      cells.forEach(([x, y]) => setTile(x, y, AIR));       // the ore is consumed
+      spawnBoss(cx * TILE + TILE / 2, (cy - 2) * TILE);
+      return;
+    }
+  }
+}
+
+function spawnBoss(centerX, topY) {
+  const boss = { kind: 'boss', x: centerX - 24, y: topY - 40, w: 48, h: 36, vx: 0, vy: 0,
+                 hp: 1000, maxHp: 1000, damage: 25, hopTimer: 60, shootTimer: 150 };
+  for (let i = 0; i < 40 && collides(boss); i++) boss.y -= TILE;   // don't spawn inside terrain
+  enemies.push(boss);
+  showToast('The Slime King awakens!');
+}
+
+// Every so often, shoot a slime ball at the player (shoots faster below 50% HP)
+function bossShoot(e) {
+  if (--e.shootTimer > 0) return;
+  const enraged = e.hp < e.maxHp / 2;
+  e.shootTimer = enraged ? 50 + Math.random() * 50 : 110 + Math.random() * 110; // Twice as fast when enraged
+  
+  const sx = e.x + e.w / 2, sy = e.y + 8;
+  const dx = player.x + player.w / 2 - sx, dy = player.y + player.h / 2 - sy;
+  const len = Math.hypot(dx, dy) || 1;
+  if (len > 500) return;
+  slimeBalls.push({ x: sx, y: sy, vx: dx / len * 3, vy: dy / len * 3, life: 240 });
+}
+
+function updateSlimeBalls() {
+  for (const b of slimeBalls) {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    // Wall collision removed: projectiles now pass through blocks
+    const hitsPlayer = b.x > player.x - 4 && b.x < player.x + player.w + 4 &&
+                       b.y > player.y - 4 && b.y < player.y + player.h + 4;
+    if (hitsPlayer && player.invincibleFrames <= 0) {
+      player.hp -= 25; // Increased to 25 damage
+      player.invincibleFrames = 45;
+      player.vx = Math.sign(b.vx) * 2.5;
+      player.vy = -2.5;
+      b.life = 0;
+    }
+  }
+  slimeBalls = slimeBalls.filter(b => b.life > 0);
+}
+
+function drawBossBar() {
+  ctx.save(); ctx.scale(UI_SCALE, UI_SCALE);
+  try { drawBossBarInner(); } finally { ctx.restore(); }
+}
+function drawBossBarInner() {
+  const boss = enemies.find(e => e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant');
+  if (!boss) return;
+  const w = Math.min(420, uiW() - 40);
+  const x = (uiW() - w) / 2, y = uiH() - 56;
+
+  // Background and fill
+  ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(x - 3, y - 3, w + 6, 20);
+  ctx.fillStyle = boss.kind === 'descendant' ? descColor(boss) : boss.kind === 'eye' ? '#d33' : '#2bd4c0';
+  ctx.fillRect(x, y, w * Math.max(0, boss.hp) / boss.maxHp, 14);
+
+  // Boss Name (above the bar)
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px system-ui, sans-serif';
+  const name = boss.kind === 'descendant' ? 'Descendant \u2014 ' + (boss.mode === 'ranged' ? 'ranged only' : 'melee only')
+             : boss.kind === 'eye' ? 'Big Bad Eye' : 'Slime King';
+  ctx.fillText(name, (uiW() - ctx.measureText(name).width) / 2, y - 8);
+
+  // Health numbers (centered inside the bar)
+  const hpText = Math.ceil(Math.max(0, boss.hp)) + ' / ' + boss.maxHp;
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.shadowColor = '#000';
+  ctx.shadowBlur = 3;
+  ctx.fillText(hpText, (uiW() - ctx.measureText(hpText).width) / 2, y + 11);
+  ctx.shadowBlur = 0;
+}
+
+// ---- Big Bad Eye (second boss) and eyelets ----
+// The Occult Book summons the boss. It only drops from zombies after the Slime King is dead.
+
+// Healing potion: restores 50 health, but only if you have potions in your hotbar
+function usePotion() {
+  // Checks if 'potion' is in the hotbar AND you have at least 1
+  if (!hotbar.includes('potion') || itemCount('potion') < 1 || player.hp >= maxHp || cooldown > 0) return;
+
+  player.hp = Math.min(maxHp, player.hp + 25);
+  inventory.potion--;
+
+  // If you used your last potion, remove it from the hotbar slot
+  if (inventory.potion <= 0) {
+    const slot = hotbar.indexOf('potion');
+    if (slot >= 0) hotbar[slot] = null;
+  }
+
+  cooldown = 30;
+}
+function useBook() {
+  if (itemCount('book') < 1 || !slimeKingDefeated) return;
+  if (enemies.some(e => e.kind === 'eye')) return;
+  inventory.book--;
+  cooldown = 30;
+  enemies.push({ kind: 'eye', x: player.x - 20, y: player.y - 260, w: 40, h: 40, vx: 0, vy: 0,
+                 hp: 5000, maxHp: 5000, damage: 25, state: 'hover', timer: 120, dashes: 0, t: 0 });
+  showToast('The Big Bad Eye watches you...');
+}
+
+// The Descendant can only be summoned once the Big Bad Eye is defeated AND you have crafted the Infinite Wings.
+function useSigil() {
+  if (itemCount('sigil') < 1) return;
+  if (!eyeDefeated || !hasInfiniteWings) {
+    cooldown = 30;
+    showToast('The sigil stays dark...\nDefeat the Big Bad Eye and craft the Infinite Wings first.');
+    return;
+  }
+  if (enemies.some(e => e.kind === 'descendant')) return;     // only one at a time
+  inventory.sigil--;
+  cooldown = 30;
+  spawnDescendant();
+}
+
+function spawnEyelet() {
+  const side = Math.random() < 0.5 ? -1 : 1;
+  enemies.push({ kind: 'eyelet', x: player.x + side * (260 + Math.random() * 120),
+                 y: player.y - 40 - Math.random() * 100, w: 14, h: 14, vx: 0, vy: 0,
+                 hp: 15, maxHp: 15, damage: 8, t: Math.random() * 100 });
+}
+
+function spawnPurpleEyelet() {
+  const side = Math.random() < 0.5 ? -1 : 1;
+  enemies.push({ kind: 'purple_eyelet', x: player.x + side * (260 + Math.random() * 120),
+                 y: player.y - 40 - Math.random() * 100, w: 14, h: 14, vx: 0, vy: 0,
+                 hp: 35, maxHp: 35, damage: 14, t: Math.random() * 100 });
+}
+
+function spawnGoldenEyelet() {
+  const side = Math.random() < 0.5 ? -1 : 1;
+  enemies.push({ kind: 'golden_eyelet', x: player.x + side * (260 + Math.random() * 120),
+                 y: player.y - 40 - Math.random() * 100, w: 14, h: 14, vx: 0, vy: 0,
+                 hp: 100, maxHp: 100, damage: 20, t: Math.random() * 100 });
+}
+
+function updateFlyer(e) {
+  const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+  const px = player.x + player.w / 2, py = player.y + player.h / 2;
+  e.t++;
+  if (e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet') {
+    const a = Math.atan2(py - cy, px - cx);
+    const speed = e.kind === 'golden_eyelet' ? 2.0 : e.kind === 'purple_eyelet' ? 1.8 : 1.5;
+    e.vx += (Math.cos(a) * speed - e.vx) * 0.05;
+    e.vy += (Math.sin(a) * speed + Math.sin(e.t * 0.12) * 0.7 - e.vy) * 0.05;
+  } else {
+    updateEyeBoss(e, cx, cy, px, py);
+  }
+  e.x += e.vx;
+  e.y += e.vy;
+}
+
+function updateEyeBoss(e, cx, cy, px, py) {
+  const enraged = e.hp <= 2000;
+  const clamp = (v, m) => Math.max(-m, Math.min(m, v));
+  e.timer--;
+
+  if (e.state === 'hover') {
+    const tx = px + Math.sin(e.t * 0.03) * 160, ty = py - 120;
+    // 1. Hover tracking speed: moves faster while floating above you (4.5 vs 2.6)
+    const hoverSpeed = enraged ? 4.5 : 2.6;
+    e.vx += (clamp((tx - cx) * 0.03, hoverSpeed) - e.vx) * 0.08;
+    e.vy += (clamp((ty - cy) * 0.03, hoverSpeed) - e.vy) * 0.08;
+
+    if (e.timer <= 0) {
+      e.state = 'windup';
+      e.timer = enraged ? 18 : 28; // 2. Faster initial windup when enraged
+      e.dashes = enraged ? 4 : 3;
+    }
+  } else if (e.state === 'windup') {
+    e.vx *= 0.88; e.vy *= 0.88;
+    if (e.timer <= 0) {
+      // 3. Dash Speed: increased from 9 to 13 when enraged (normal is 7)
+      const a = Math.atan2(py - cy, px - cx);
+      const speed = enraged ? 9 : 7;
+      e.vx = Math.cos(a) * speed;
+      e.vy = Math.sin(a) * speed;
+      e.state = 'dash';
+      e.timer = 32;
+    }
+  } else if (e.timer <= 0) {
+    if (--e.dashes > 0) {
+      e.state = 'windup';
+      e.timer = enraged ? 10 : 16; // 4. Less pause between consecutive dashes
+    } else {
+      e.state = 'hover';
+      e.timer = enraged ? 40 : 110 + Math.random() * 40; // 5. Shorter break before next attack (40 frames ≈ 0.66s)
+    }
+  }
+}
+
+function updateEnemy(e) {
+  if (e.hitFlash > 0) e.hitFlash--; // Count down hit flash
+  const playerCenterX = player.x + player.w / 2;
+  const dir = Math.sign(playerCenterX - (e.x + e.w / 2));
+  if (e.kind === 'boss') bossShoot(e);
+  if (e.kind === 'descendant') { updateDescendant(e, dir); return; }
+  if (e.kind === 'eye' || e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet') {
+    updateFlyer(e);
+    touchPlayer(e, dir);
+    return;
+  }
+
+  if (e.kind === 'zombie') {
+    if (e.onGround) e.vx = dir * 0.9 + e.vx * 0.2;
+    if (e.blockedSideways && e.onGround) e.vy = -5.5;
+  } else {
+    e.hopTimer--;
+    if (e.onGround) {
+      e.vx *= 0.8;
+      if (e.hopTimer <= 0) {
+        const boss = e.kind === 'boss';
+        e.vy = boss ? -6.5 : -5.5;
+        e.vx = dir * (boss ? 1.3 : 2);
+        e.hopTimer = boss ? 100 + Math.random() * 50 : 50 + Math.random() * 30;
+      }
+    }
+  }
+  e.vy = Math.min(e.vy + GRAVITY, MAX_FALL);
+  moveBody(e);
+
+  touchPlayer(e, dir);
+}
+
+function drawEye(e) {
+  const cx = e.x + e.w / 2, cy = e.y + e.h / 2, r = e.w / 2;
+  const enraged = e.kind === 'eye' && e.hp <= 1500;
+  const isPurple = e.kind === 'purple_eyelet', isGold = e.kind === 'golden_eyelet';
+  const flash = e.state === 'windup' && Math.floor(e.t / 3) % 2;
+
+  // Flash bright red when hit
+  ctx.fillStyle = e.hitFlash > 0 ? '#ff4d4d' : (flash ? '#ff9a9a' : isGold ? '#fff1b8' : isPurple ? '#e2c8ff' : enraged ? '#e8b4b4' : '#f2f2f2');
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = e.hitFlash > 0 ? '#ff0000' : (isGold ? '#b8860b' : isPurple ? '#7b2cbf' : '#b22'); ctx.lineWidth = 1; ctx.stroke();
+
+  const a = Math.atan2(player.y + 13 - cy, player.x + 6 - cx);
+  const ix = cx + Math.cos(a) * r * 0.35, iy = cy + Math.sin(a) * r * 0.35;
+  ctx.fillStyle = isGold ? '#e0a800' : isPurple ? '#9d4edd' : '#c22'; ctx.beginPath(); ctx.arc(ix, iy, r * 0.45, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(ix, iy, r * 0.2, 0, Math.PI * 2); ctx.fill();
+
+  if (e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet') {
+    ctx.fillStyle = '#a22'; ctx.fillRect(e.x, e.y - 5, e.w, 2);
+    ctx.fillStyle = '#2c2'; ctx.fillRect(e.x, e.y - 5, e.w * e.hp / e.maxHp, 2);
+  }
+}
+
+function onEnemyKilled(e) {
+  kills++;
+  const eyeAlive = enemies.some(en => en.kind === 'eye');
+
+  // Zombies drop Occult Books after Slime King is defeated
+  if (e.kind === 'zombie' && slimeKingDefeated && itemCount('book') < 1 && !eyeAlive && Math.random() < 0.25) {
+    addItem('book');
+    showToast('Zombie dropped an Occult Book! Click with it to summon a boss.');
+  }
+
+  // Eyelets drop Angel Tears (Artefacts no longer drop)
+  if (e.kind === 'eyelet' && !hasWings && itemCount('angel_tear') < 4 && Math.random() < 0.25) {
+    addItem('angel_tear');
+    showToast(itemCount('angel_tear') >= 4 ? 'You have 4 Angel Tears! Craft the Wings (E).'
+                                           : 'An eyelet dropped an Angel Tear! (' + itemCount('angel_tear') + '/4)');
+  }
+
+  // Slimes drop Gel
+  if ((e.kind === 'slime' || e.kind === 'green') && !hasSlimeBoots && itemCount('gel') < 10 && Math.random() < 0.4) {
+    addItem('gel');
+    if (itemCount('gel') >= 10) showToast('You have 10 Gel! Craft the Slime Boots (E).');
+  }
+
+  // Purple Eyelets drop God's Tears
+  if (e.kind === 'purple_eyelet' && !hasInfiniteWings && itemCount('god_tear') < 4 && Math.random() < 0.25) {
+    addItem('god_tear');
+    showToast(itemCount('god_tear') >= 4 ? "You have 4 God's Tears! Craft the Infinite Wings (E)."
+                                         : "A purple eyelet dropped a God's Tear! (" + itemCount('god_tear') + '/4)');
+  }
+
+  // Golden Eyelets drop Ancient Artefacts (3 craft the Descendant Sigil)
+  if (e.kind === 'golden_eyelet' && itemCount('ancient_artefact') < 3 && Math.random() < 0.25) {
+    addItem('ancient_artefact');
+    showToast(itemCount('ancient_artefact') >= 3 ? 'You have 3 Ancient Artefacts! Craft the Descendant Sigil (E).'
+                                                 : 'A golden eyelet dropped an Ancient Artefact! (' + itemCount('ancient_artefact') + '/3)');
+  }
+
+  if (e.kind === 'descendant') { angelSwords = []; showToast('The Descendant has been defeated!'); }
+
+  // Big Bad Eye: 1 in 6 chance to drop Big Bad Sword
+  if (e.kind === 'eye') {
+    eyeDefeated = true;
+    if (maxHp < 150) maxHp = 150;
+    player.hp = maxHp;
+
+    if (!hasBossSword && Math.random() < 1 / 6) {
+      hasBossSword = true;
+      addItem('sword');
+      showToast('The Big Bad Eye dropped the Big Bad Sword!\nMax health is now ' + maxHp);
+    } else {
+      showToast('The Big Bad Eye was defeated! Max health is now ' + maxHp);
+    }
+  }
+
+  // Slime King: 1 in 6 chance to drop Slime Gun
+  if (e.kind === 'boss') {
+    slimeKingDefeated = true;
+    if (!hasBetterGun && Math.random() < 1 / 6) {
+      hasBetterGun = true;
+      addItem('gun');
+      showToast('The Slime King dropped the Slime Gun!');
+    } else {
+      showToast('The Slime King was defeated!');
+    }
+  }
+}
+
+function touchPlayer(e, dir) {
+  const touching = player.x < e.x + e.w && player.x + player.w > e.x &&
+                   player.y < e.y + e.h && player.y + player.h > e.y;
+  if (touching && player.invincibleFrames <= 0) {
+    player.hp -= e.damage;
+    player.invincibleFrames = 45;
+    player.vx = -dir * 3.5;
+    player.vy = -3.5;
+  }
+}
+
+// =====================================================================
+// 8. MAIN UPDATE (runs 60 times per second)
+// =====================================================================
+function update() {
+  updatePlayer();
+  updateSwordHits();
+  updateBullets();
+  enemies.forEach(updateEnemy);
+  updateSlimeBalls();
+  updateAngelSwords();
+
+  // Remove dead or far-away enemies, and count kills.
+  enemies = enemies.filter(e => {
+    if (e.hp <= 0) { onEnemyKilled(e); return false; }
+    return e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant' || Math.hypot(e.x - player.x, e.y - player.y) < 700;   // the boss never despawns
+  });
+
+  if (--spawnTimer <= 0) {
+    spawnTimer = 110;
+    if (enemies.length < 7) spawnEnemy();
+  }
+
+  if (player.hp <= 0) respawn();
+
+  // Camera follows the player, clamped to the world edges.
+  camera.x = Math.max(0, Math.min(WORLD_W * TILE - viewW, player.x - viewW / 2));
+  camera.y = Math.max(0, Math.min(WORLD_H * TILE - viewH, player.y - viewH / 2));
+}
+
+function updatePlayer() {
+  if (dashEndPending) { player.vx = 0; dashEndPending = false; }   // stop dead when the dash ends (keeps it exactly 10 tiles)
+  const left = keys['a'] || keys['arrowleft'];
+  const right = keys['d'] || keys['arrowright'];
+  if (left)       { player.vx = Math.max(player.vx - 0.5, -2.2); player.facing = -1; }
+  else if (right) { player.vx = Math.min(player.vx + 0.5,  2.2); player.facing = 1; }
+  else            { player.vx *= 0.7; }                       // friction
+
+  // Slime boots: press Shift to dash the way you are facing (short cooldown).
+  const dashKey = !!keys['shift'];
+  if (dashKey && !dashWasDown && hasSlimeBoots && dashCooldown <= 0 && !inventoryOpen) {
+    dashDir = player.facing; dashFrames = DASH_FRAMES; dashCooldown = DASH_COOLDOWN;
+  }
+  dashWasDown = dashKey;
+  if (dashCooldown > 0) dashCooldown--;
+  if (dashFrames > 0) {
+    dashFrames--;
+    if (dashFrames === 0) dashEndPending = true;
+    player.vx = dashDir * DASH_SPEED;                   // overrides normal walking while dashing
+    if (player.vy > 0) player.vy = 0;                   // no falling mid-dash
+    dashTrail.push({ x: player.x, y: player.y, life: 12 });
+  }
+  dashTrail.forEach(t => t.life--);
+  dashTrail = dashTrail.filter(t => t.life > 0);
+
+  const jumpPressed = keys['w'] || keys[' '] || keys['arrowup'];
+  if (jumpPressed && player.onGround) player.vy = -6.3;
+
+ // Wings: let go of jump in the air, then hold it again to fly
+  if (player.onGround) { flightTime = FLIGHT_MAX; wingsArmed = false; }
+  else if (!jumpPressed) wingsArmed = true;
+  player.flying = hasWings && wingsArmed && jumpPressed && !player.onGround && (hasInfiniteWings || flightTime > 0);
+  if (player.flying) {
+    player.vy = Math.max(player.vy - 0.6, -3);
+    if (!hasInfiniteWings) flightTime--;
+  }
+
+  if (keys['s'] || keys['arrowdown']) player.dropFrames = 8;   // hold S to fall through platforms
+  player.vy = Math.min(player.vy + GRAVITY, MAX_FALL);
+  moveBody(player);
+  if (player.dropFrames > 0) player.dropFrames--;
+  if (player.y > WORLD_H * TILE) player.y = 0;                // safety net if you fall out
+
+  cooldown--;
+  player.invincibleFrames--;
+  if (swingFrames > 0) swingFrames--;
+
+  if (leftDown) useItem();
+  if (!leftDown) mining.progress = 0;
+  updateDebris();
+  if (rightDown) rightClick();                                // doors and placing
+}
+
+// While swinging, damage enemies within 46px in front of the player (once per swing).
+const isBoss = e => e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant';   // bosses ignore knockback
+
+function updateSwordHits() {
+  if (swingFrames <= 0) return;
+  const cx = player.x + player.w / 2, cy = player.y + player.h / 2;
+  const aimX = mouseWorldX() - cx, aimY = mouseWorldY() - (player.y + 8);
+  const aimLen = Math.hypot(aimX, aimY) || 1;
+
+  for (const e of enemies) {
+    if (swingAlreadyHit.has(e)) continue;
+    const dx = e.x + e.w / 2 - cx, dy = e.y + e.h / 2 - cy;
+    const inFront = (dx * aimX + dy * aimY) / aimLen > -6;
+    if (Math.hypot(dx, dy) < (swingItem === 'sword' && hasBossSword ? 56 : 46) && inFront) {
+      swingAlreadyHit.add(e);
+      if (e.kind === 'descendant' && e.mode !== 'melee') { e.immuneFlash = 10; continue; }   // blue swords: ranged damage only
+      e.hp -= swingItem === 'silver_sword' ? 28 : hasBossSword ? 55 : 10;   // silver sword 28 / Slime Blade 55 / default sword 10
+      e.hitFlash = 8; // <--- ADDED HERE
+      if (!isBoss(e)) e.vx = Math.sign(dx || 1) * 4;
+      if (!isBoss(e)) e.vy = -3.5;
+    }
+  }
+}
+
+function updateBullets() {
+  for (const b of bullets) {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    if (isSolid(Math.floor(b.x / TILE), Math.floor(b.y / TILE))) b.life = 0;
+    for (const e of enemies) {
+      const hit = b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h;
+      if (b.life > 0 && hit) {
+        if (e.kind === 'descendant' && e.mode !== 'ranged') { e.immuneFlash = 10; b.life = 0; continue; }   // red swords: melee damage only
+        e.hp -= b.honza ? 10000 : (hasBetterGun ? 50 : 14);
+        e.hitFlash = 8; // <--- ADDED HERE
+        if (!isBoss(e)) e.vx = Math.sign(b.vx) * 2;
+        if (!isBoss(e)) e.vy = -2;
+        b.life = 0;
+      }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+}
+
+function respawn() {
+  player.hp = maxHp;
+  player.x = SPAWN_X; player.y = SPAWN_Y;
+  player.vx = player.vy = 0;
+  angelSwords = [];
+  if (enemies.some(e => e.kind === 'eye')) addItem('book');   // refund the book if you die mid-fight
+  if (enemies.some(e => e.kind === 'descendant')) addItem('sigil');   // ...and the sigil
+  enemies = [];
+  slimeBalls = [];
+  showToast('You died — respawned at spawn');
+}
+
+// =====================================================================
+// 9. DRAWING
+// =====================================================================
+// ---- Item slots and the inventory panel (press E) ----
+const SLOT = 52, GAP = 6, HOTBAR_Y = 22, BACKPACK_Y = 98;
+
+// Draw one slot: colored swatch, name, count (materials) and key number.
+function drawSlot(x, y, size, id, selected, keyLabel) {
+  const fg = selected ? '#000' : '#fff';
+  ctx.fillStyle = selected ? 'rgba(255,255,255,.85)' : 'rgba(0,0,0,.55)';
+  ctx.fillRect(x, y, size, size);
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillStyle = fg;
+  if (keyLabel) ctx.fillText(keyLabel, x + 3, y + 11);
+  if (!id) return;
+  const sprite = PICK_SPRITES[id] || ITEM_SPRITES[id];
+  if (sprite && sheet.complete) {
+    const s = size * 0.5;
+    drawSprite(sprite, x + (size - s) / 2, y + size * 0.14, s, s);
+  } else {
+    // Red for Big Bad Sword, slime green for Slime Gun
+    ctx.fillStyle = (id === 'sword' && hasBossSword) ? '#ff3344' : (id === 'gun' && hasBetterGun) ? '#3ecf8e' : ITEMS[id].color;
+    ctx.fillRect(x + size * 0.3, y + size * 0.22, size * 0.4, size * 0.36);
+  }
+  ctx.fillStyle = fg;
+  ctx.fillText(ITEMS[id].slot || itemName(id), x + 3, y + size - 4);
+  if (isPlaceable(id) || ITEMS[id].counted) {
+    const count = String(itemCount(id));
+    ctx.fillText(count, x + size - 3 - ctx.measureText(count).width, y + 11);
+  }
+}
+
+function panelLayout() {
+  const w = HOTBAR_SIZE * (SLOT + GAP) - GAP;
+  const panelH = debugOpen ? debugTop() + 60 + Math.ceil(DEBUG_ACTIONS.length / 4) * 30   // debug buttons come 4 per row
+                           : debugTop() + 52;                                            // hidden: only the Debug button
+  const y0 = Math.max(15, Math.min(30, Math.floor((uiH() - panelH) / 2)));
+  return { x0: Math.floor((uiW() - w) / 2) + Math.round(panelOffX), y0: y0 + Math.round(panelOffY), w, panelH };
+}
+// Keep the dragged panel fully on screen.
+function clampPanel() {
+  const w = HOTBAR_SIZE * (SLOT + GAP) - GAP;
+  const panelH = debugOpen ? debugTop() + 60 + Math.ceil(DEBUG_ACTIONS.length / 4) * 30 : debugTop() + 52;
+  const baseX = Math.floor((uiW() - w) / 2);
+  const baseY = Math.max(15, Math.min(30, Math.floor((uiH() - panelH) / 2)));
+  panelOffX = Math.max(16 - baseX, Math.min(uiW() - 16 - w - baseX, panelOffX));
+  panelOffY = Math.max(24 - baseY, Math.min(uiH() - (panelH - 24) - baseY, panelOffY));
+}
+// Is the mouse over the panel background?
+const mouseInPanel = L => uiMX() >= L.x0 - 16 && uiMX() <= L.x0 + L.w + 16 && uiMY() >= L.y0 - 24 && uiMY() <= L.y0 - 24 + L.panelH;
+const slotPos = (L, col, row, offsetY) => ({ x: L.x0 + col * (SLOT + GAP), y: L.y0 + offsetY + row * (SLOT + GAP) });
+const mouseInSlot = p => uiMX() >= p.x && uiMX() <= p.x + SLOT && uiMY() >= p.y && uiMY() <= p.y + SLOT;
+
+// Tools always show in the backpack; materials show once you own some.
+const ownedItems = () => ITEM_ORDER.filter(id => ITEMS[id].crafted ? itemCount(id) > 0 : ((!ITEMS[id].tile && !ITEMS[id].counted) || itemCount(id) > 0));
+
+const backpackRows = () => Math.max(2, Math.ceil(ownedItems().length / HOTBAR_SIZE));   // always 2+ rows, so the crafting slots don't jump when an item runs out
+
+// Recipe slots sit under the backpack (same slot grid); the debug buttons sit under the recipes.
+const craftTop  = () => BACKPACK_Y + backpackRows() * (SLOT + GAP) + 22;      // y offset of the first recipe slot
+const craftRows = () => Math.ceil(RECIPES.length / HOTBAR_SIZE);
+const debugTop  = () => craftTop() + craftRows() * (SLOT + GAP) + 14;         // y offset of the debug title
+const recipeSlot = (L, i) => slotPos(L, i % HOTBAR_SIZE, Math.floor(i / HOTBAR_SIZE), craftTop());
+
+// The Debug toggle button that shows/hides the debug menu
+const debugToggleRect = L => ({ x: L.x0, y: L.y0 + debugTop() - 6, w: 110, h: 22 });
+const mouseInRect = b => uiMX() >= b.x && uiMX() <= b.x + b.w && uiMY() >= b.y && uiMY() <= b.y + b.h;
+
+// Rectangle calculation for each debug button (arranged in 2 rows of 4)
+function debugBtnRect(L, i) {
+  const startY = L.y0 + debugTop() + 28;   // below the Debug toggle button
+  const col = i % 4;
+  const row = Math.floor(i / 4);
+  const btnW = Math.floor((L.w - 3 * 6) / 4);
+  const btnH = 24;
+  return {
+    x: L.x0 + col * (btnW + 6),
+    y: startY + row * (btnH + 6),
+    w: btnW,
+    h: btnH
+  };
+}
+
+// Click a hotbar slot to select it; click a backpack item to put it in the selected slot.
+// ---- Minecraft-style item carrying ----
+// Press on an item to pick it up; it follows the cursor. Release over a hotbar slot (drag),
+// or click a hotbar slot (click, click) to drop it there. Items already in the hotbar swap places.
+// Dragging a hotbar item onto the backpack area clears that slot; releasing elsewhere cancels.
+let carry = null;   // { id, src: 'bag' | 'hotbar', idx, sx, sy }
+const hotbarIdxAt = L => { for (let i = 0; i < HOTBAR_SIZE; i++) if (mouseInSlot(slotPos(L, i, 0, HOTBAR_Y))) return i; return -1; };
+const bagItemAt = L => ownedItems().find((id, i) => mouseInSlot(slotPos(L, i % HOTBAR_SIZE, Math.floor(i / HOTBAR_SIZE), BACKPACK_Y)));
+
+function dropCarry(hi) {
+  const prev = hotbar[hi];
+  if (carry.src === 'hotbar') hotbar[carry.idx] = prev;                        // swap with the slot it came from
+  else { const old = hotbar.indexOf(carry.id); if (old >= 0 && old !== hi) hotbar[old] = prev; }   // an item lives in one slot only
+  hotbar[hi] = carry.id;
+  selectedSlot = hi;
+  carry = null;
+}
+
+function clickInventory(shift = false) {
+  const L = panelLayout();
+  if (carry) {                                                // already holding an item: this click drops or cancels
+    const hi = hotbarIdxAt(L);
+    if (hi >= 0) dropCarry(hi); else carry = null;
+    return;
+  }
+  const hi = hotbarIdxAt(L);
+  if (hi >= 0) {                                             // hotbar slot: select it and pick up its item
+    selectedSlot = hi;
+    if (hotbar[hi]) carry = { id: hotbar[hi], src: 'hotbar', idx: hi, sx: mouseX, sy: mouseY };
+    return;
+  }
+  const bagId = bagItemAt(L);
+  if (bagId) { carry = { id: bagId, src: 'bag', idx: -1, sx: mouseX, sy: mouseY }; return; }
+  let hit = false;
+  RECIPES.forEach((r, i) => {                                // click a recipe to craft it (Shift: as many as possible)
+    if (mouseInSlot(recipeSlot(L, i))) { craft(r, shift); hit = true; }
+  });
+  if (mouseInRect(debugToggleRect(L))) { debugOpen = !debugOpen; return; }   // show / hide the debug menu
+  (debugOpen ? DEBUG_ACTIONS : []).forEach((btn, i) => {     // debug buttons (only while the menu is open)
+    if (mouseInRect(debugBtnRect(L, i))) { btn.action(); hit = true; }
+  });
+  if (!hit && mouseInPanel(L)) uiDrag = { dx: uiMX() - panelOffX, dy: uiMY() - panelOffY };   // empty panel area: drag to move
+}
+
+// Mouse released: finish a drag. A press-and-release without moving keeps a backpack item
+// in your hand (click, click) and just selects a hotbar slot.
+function releaseInventory() {
+  if (!carry) return;
+  const L = panelLayout();
+  const moved = Math.hypot(mouseX - carry.sx, mouseY - carry.sy) > 6;
+  if (!moved) { if (carry.src === 'hotbar') carry = null; return; }
+  const hi = hotbarIdxAt(L);
+  if (hi >= 0) dropCarry(hi);
+  else if (carry.src === 'hotbar' && mouseInPanel(L)) { hotbar[carry.idx] = null; carry = null; }   // back into the backpack
+  else carry = null;
+}
+
+function drawInventoryPanel() {
+  const L = panelLayout();
+  ctx.fillStyle = 'rgba(0,0,0,.75)';
+  ctx.fillRect(L.x0 - 16, L.y0 - 24, L.w + 32, L.panelH);
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('Hotbar — drag items between the backpack and these slots', L.x0, L.y0 - 6);
+  ctx.fillText('Backpack (E or Esc to close) — drag empty space to move the panel', L.x0, L.y0 + BACKPACK_Y - 8);
+  for (let i = 0; i < HOTBAR_SIZE; i++) {
+    const p = slotPos(L, i, 0, HOTBAR_Y);
+    const lifted = carry && carry.src === 'hotbar' && carry.idx === i;
+    ctx.globalAlpha = lifted ? 0.35 : 1;
+    drawSlot(p.x, p.y, SLOT, hotbar[i], i === selectedSlot, CZ_SLOT_KEYS[i]);
+    ctx.globalAlpha = 1;
+    if (carry && hotbarIdxAt(L) === i) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(p.x, p.y, SLOT, SLOT); }   // drop target
+  }
+  ownedItems().forEach((id, i) => {
+    const p = slotPos(L, i % HOTBAR_SIZE, Math.floor(i / HOTBAR_SIZE), BACKPACK_Y);
+    drawSlot(p.x, p.y, SLOT, id, hotbar[selectedSlot] === id, '');
+  });
+
+  // Crafting: one slot per recipe; green = you can craft it now, dim = missing ingredients
+  ctx.fillStyle = '#fff'; ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('Crafting — hover for ingredients, click to craft (Shift+click: craft max)', L.x0, L.y0 + craftTop() - 8);
+  let hovered = -1;
+  RECIPES.forEach((r, i) => {
+    const p = recipeSlot(L, i);
+    const hover = mouseInSlot(p);
+    if (hover) hovered = i;
+    drawRecipeSlot(p, r, hover);
+  });
+
+  // Debug Menu Section
+  const tb = debugToggleRect(L);
+  ctx.fillStyle = mouseInRect(tb) ? '#a855f7' : 'rgba(168, 85, 247, 0.35)';
+  ctx.fillRect(tb.x, tb.y, tb.w, tb.h);
+  ctx.strokeStyle = '#c084fc';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(tb.x, tb.y, tb.w, tb.h);
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px system-ui, sans-serif';
+  const tbLabel = debugOpen ? 'Hide Debug' : 'Debug';
+  ctx.fillText(tbLabel, tb.x + (tb.w - ctx.measureText(tbLabel).width) / 2, tb.y + 15);
+
+  (debugOpen ? DEBUG_ACTIONS : []).forEach((btn, i) => {
+    const b = debugBtnRect(L, i);
+    const hover = uiMX() >= b.x && uiMX() <= b.x + b.w && uiMY() >= b.y && uiMY() <= b.y + b.h;
+    ctx.fillStyle = hover ? '#a855f7' : 'rgba(168, 85, 247, 0.35)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = '#c084fc';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillText(btn.label, b.x + (b.w - ctx.measureText(btn.label).width) / 2, b.y + 16);
+  });
+
+  if (carry) {                                                  // the item in your hand follows the cursor
+    ctx.globalAlpha = 0.9;
+    drawSlot(uiMX() - SLOT / 2, uiMY() - SLOT / 2, SLOT, carry.id, false, '');
+    ctx.globalAlpha = 1;
+  } else if (hovered >= 0) drawRecipeTooltip(RECIPES[hovered]);      // last, so it draws on top of everything
+}
+
+// One recipe slot: the result's icon, short name, and "x2" when a craft makes several.
+function drawRecipeSlot(p, r, hover) {
+  const done = isDone(r), ok = canCraft(r);
+  ctx.fillStyle = done ? 'rgba(255,255,255,.10)'
+                : ok   ? (hover ? 'rgba(90,200,110,.95)' : 'rgba(60,160,80,.8)')
+                :        (hover ? 'rgba(255,255,255,.22)' : 'rgba(0,0,0,.55)');
+  ctx.fillRect(p.x, p.y, SLOT, SLOT);
+  ctx.globalAlpha = ok ? 1 : 0.4;                            // dim when you can't craft it
+  const sprite = PICK_SPRITES[r.icon] || ITEM_SPRITES[r.icon];
+  if (sprite && sheet.complete) {
+    const sz = SLOT * 0.5;
+    drawSprite(sprite, p.x + (SLOT - sz) / 2, p.y + SLOT * 0.14, sz, sz);
+  } else {
+    ctx.fillStyle = r.color || ITEMS[r.icon].color;
+    ctx.fillRect(p.x + SLOT * 0.3, p.y + SLOT * 0.22, SLOT * 0.4, SLOT * 0.36);
+  }
+  ctx.fillStyle = '#fff'; ctx.font = '10px system-ui, sans-serif';
+  ctx.fillText(r.label, p.x + 3, p.y + SLOT - 4);
+  if (r.gives > 1) {
+    const t = 'x' + r.gives;
+    ctx.fillText(t, p.x + SLOT - 3 - ctx.measureText(t).width, p.y + 11);
+  }
+  ctx.globalAlpha = 1;
+  if (done) ctx.fillText('crafted', p.x + 3, p.y + 11);
+}
+
+// Hover box listing what a recipe needs (green = you have enough, red = you don't).
+function drawRecipeTooltip(r) {
+  const lines = [{ t: r.name + (r.gives > 1 ? ' x' + r.gives : ''), c: '#fff', f: '13px system-ui, sans-serif' }];
+  if (r.desc) lines.push({ t: r.desc, c: '#bbb', f: '11px system-ui, sans-serif' });
+  for (const [id, n] of Object.entries(r.cost)) {
+    const have = itemCount(id);
+    lines.push({ t: n + ' ' + ITEMS[id].name + '  (you have ' + have + ')', c: have >= n ? '#9f9' : '#f99', f: '12px system-ui, sans-serif' });
+  }
+  const once = !!r.done;
+  lines.push(isDone(r) ? { t: 'Already crafted', c: '#9a9', f: '11px system-ui, sans-serif' }
+           : canCraft(r) ? { t: once ? 'Click to craft' : 'Click to craft - Shift+click for max', c: '#fff', f: '11px system-ui, sans-serif' }
+           : { t: 'Missing ingredients', c: '#f99', f: '11px system-ui, sans-serif' });
+  let w = 0;
+  for (const l of lines) { ctx.font = l.f; w = Math.max(w, ctx.measureText(l.t).width); }
+  w += 20;
+  const h = lines.length * 17 + 12;
+  const x = Math.max(4, Math.min(uiMX() + 16, uiW() - w - 4));
+  const y = Math.max(4, Math.min(uiMY() + 16, uiH() - h - 4));
+  ctx.fillStyle = 'rgba(15,15,25,.95)'; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  lines.forEach((l, i) => { ctx.font = l.f; ctx.fillStyle = l.c; ctx.fillText(l.t, x + 10, y + 18 + i * 17); });
+}
+
+function draw() {
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  ctx.imageSmoothingEnabled = false;   // keep pixel art sharp
+  drawSky(dark);
+
+  // World-space drawing: scale by ZOOM and shift by the camera.
+  ctx.setTransform(ZOOM, 0, 0, ZOOM, -Math.floor(camera.x) * ZOOM, -Math.floor(camera.y) * ZOOM);
+  drawTiles(dark);
+  drawBreakCracks();
+  enemies.forEach(drawEnemy);
+  ctx.fillStyle = '#ffd34d';
+  bullets.forEach(b => ctx.fillRect(b.x - 1.5, b.y - 1.5, 3, 3));
+  ctx.fillStyle = '#5be07a';
+  slimeBalls.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, Math.PI * 2); ctx.fill(); });
+  angelSwords.forEach(sw => drawAngelSword(sw.x, sw.y, Math.atan2(sw.vy, sw.vx), 14, sw.color));
+  drawPlayer();
+  drawHeldItem();
+  drawDebris();
+  drawTileCursor();
+
+  // Screen-space drawing (no camera): the HUD.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(UI_SCALE, UI_SCALE);                       // HUD + inventory are drawn 50% bigger
+  drawHud();
+  if (inventoryOpen) { clampPanel(); drawInventoryPanel(); }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawBossBar();
+}
+
+function drawSky(dark) {
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, dark ? '#1a2a4a' : '#6fb3f2');
+  grad.addColorStop(1, dark ? '#2c3f66' : '#bfe0ff');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawTiles(dark) {
+  // Only draw tiles that are on screen.
+  const x0 = Math.max(0, Math.floor(camera.x / TILE));
+  const x1 = Math.min(WORLD_W - 1, Math.ceil((camera.x + viewW) / TILE));
+  const y0 = Math.max(0, Math.floor(camera.y / TILE));
+  const y1 = Math.min(WORLD_H - 1, Math.ceil((camera.y + viewH) / TILE));
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const tile = world[y * WORLD_W + x];
+      const seeThrough = tile === AIR || tile === PLATFORM || tile === DOOR_OPEN;
+      if (seeThrough && y > surface[x] + 4) {      // darker backdrop for caves
+        ctx.fillStyle = dark ? '#14161c' : '#3a3f4a';
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+      }
+      if (tile === AIR) continue;
+      if (tile === PLATFORM) {                     // thin plank on top of the tile
+        ctx.fillStyle = '#a0693a'; ctx.fillRect(x * TILE, y * TILE, TILE, 4);
+        ctx.fillStyle = '#6b4423'; ctx.fillRect(x * TILE, y * TILE + 3, TILE, 1);
+        continue;
+      }
+      if (tile === DOOR) {                         // closed door with a knob
+        ctx.fillStyle = '#a0693a'; ctx.fillRect(x * TILE + 2, y * TILE, TILE - 4, TILE);
+        ctx.fillStyle = '#6b4423'; ctx.fillRect(x * TILE + 2, y * TILE, 2, TILE);
+        ctx.fillStyle = '#ffd34d'; ctx.fillRect(x * TILE + TILE - 6, y * TILE + 7, 2, 2);
+        continue;
+      }
+      if (tile === DOOR_OPEN) {                    // open door: thin edge only
+        ctx.fillStyle = '#6b4423'; ctx.fillRect(x * TILE + 2, y * TILE, 3, TILE);
+        continue;
+      }
+      if (tile === BUSH) {                         // berry bush: leafy mound with red berries
+        const bx = x * TILE, by = y * TILE;
+        ctx.fillStyle = '#2a6f2e'; ctx.fillRect(bx + 1, by + 8, 14, 8);
+        ctx.fillStyle = '#3a9a3f'; ctx.fillRect(bx + 3, by + 4, 10, 6); ctx.fillRect(bx + 5, by + 2, 6, 3);
+        ctx.fillStyle = '#d1264a';
+        for (const [dx, dy] of [[3, 9], [9, 6], [11, 11], [6, 12]]) ctx.fillRect(bx + dx, by + dy, 3, 3);
+        ctx.fillStyle = '#ff9db5';
+        for (const [dx, dy] of [[3, 9], [9, 6], [11, 11], [6, 12]]) ctx.fillRect(bx + dx, by + dy, 1, 1);
+        continue;
+      }
+      const sprite = TILE_SPRITES[tile];
+      if (sprite && sheet.complete) {
+        drawSprite(sprite, x * TILE, y * TILE, TILE, TILE);   // your texture
+      } else {                                               // fallback: plain colors
+        ctx.fillStyle = TILE_COLORS[tile];
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        if (tile === GRASS) { ctx.fillStyle = '#4caf50'; ctx.fillRect(x * TILE, y * TILE, TILE, 4); }
+      }
+      if (tile === ORE) {
+        ctx.fillStyle = '#f0c040';
+        ctx.fillRect(x * TILE + 3, y * TILE + 3, 4, 4);
+        ctx.fillRect(x * TILE + 9, y * TILE + 8, 4, 4);
+      }
+      if (tile === SILVER) {                       // pale blue-white flecks with a dark rim
+        for (const [dx, dy] of [[9, 2], [3, 9]]) {
+          ctx.fillStyle = '#6f7b8a'; ctx.fillRect(x * TILE + dx - 1, y * TILE + dy - 1, 6, 6);
+          ctx.fillStyle = '#e8f0fa'; ctx.fillRect(x * TILE + dx, y * TILE + dy, 4, 4);
+        }
+      }
+    }
+  }
+}
+
+// =====================================================================
+// DESCENDANT (angelic boss): a white block with a crown and 8 floating swords.
+// Its swords are BLUE while only ranged damage hurts it and RED while only melee
+// damage hurts it. The mode flips every 15 seconds. It flies (through blocks),
+// throws swords that also fly through blocks, and sometimes dashes for 50 damage.
+// Summoned with the Descendant Sigil (3 Ancient Artefacts); the debug menu can also spawn it.
+// =====================================================================
+const DESC_BLUE = '#6aa0ff', DESC_RED = '#ff4d4d';
+const descColor = e => e.mode === 'ranged' ? DESC_BLUE : DESC_RED;
+const orbitAngle = (e, i) => e.t * 0.03 + i * Math.PI / 4;      // angle of floating sword i
+
+function spawnDescendant() {
+  if (enemies.some(e => e.kind === 'descendant')) return;      // only one at a time
+  enemies.push({ kind: 'descendant', x: player.x - 28, y: player.y - 260, w: 56, h: 56, vx: 0, vy: 0,
+                 hp: 6000, maxHp: 6000, damage: 50, mode: 'ranged', modeTimer: 900,
+                 state: 'hover', timer: 150, throwTimer: 90, t: 0, immuneFlash: 0 });
+  showToast('The Descendant descends...');
+}
+
+function updateDescendant(e, dir) {
+  const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+  const px = player.x + player.w / 2, py = player.y + player.h / 2;
+  const clamp = (v, m) => Math.max(-m, Math.min(m, v));
+  e.t++;
+  if (e.immuneFlash > 0) e.immuneFlash--;
+  if (--e.modeTimer <= 0) {                                  // alternate every 15 s (900 frames)
+    e.mode = e.mode === 'ranged' ? 'melee' : 'ranged';
+    e.modeTimer = 900;
+  }
+  e.timer--;
+
+  if (e.state === 'hover') {
+    // Circle the player. In melee (red) mode it stays close so melee attacks can reach it.
+    const near = e.mode === 'melee';
+    const rx = near ? 110 : 260, ry = near ? 30 : 110;
+    const tx = px + Math.cos(e.t * 0.02) * rx, ty = py - ry + Math.sin(e.t * 0.035) * 40;
+    e.vx += (clamp((tx - cx) * 0.03, 3) - e.vx) * 0.08;
+    e.vy += (clamp((ty - cy) * 0.03, 3) - e.vy) * 0.08;
+    if (--e.throwTimer <= 0) { throwAngelSwords(e, cx, cy, px, py); e.throwTimer = 50 + Math.random() * 40; }
+    if (e.timer <= 0) { e.state = 'windup'; e.timer = 35; }   // telegraph, then dash
+  } else if (e.state === 'windup') {
+    e.vx *= 0.88; e.vy *= 0.88;
+    if (e.timer <= 0) {
+      const a = Math.atan2(py - cy, px - cx);
+      e.vx = Math.cos(a) * 11; e.vy = Math.sin(a) * 11;
+      e.state = 'dash'; e.timer = 28;
+    }
+  } else {                                                    // dash: contact deals 50 damage
+    touchPlayer(e, dir);
+    if (e.timer <= 0) { e.state = 'hover'; e.timer = 180 + Math.random() * 120; e.throwTimer = 40; }
+  }
+  e.x += e.vx;                                               // flies: ignores blocks
+  e.y += e.vy;
+}
+
+// Launch a sword (a fan of 3 below half health) from the floating ring toward the player.
+function throwAngelSwords(e, cx, cy, px, py) {
+  const count = e.hp < e.maxHp / 2 ? 3 : 1;
+  const base = Math.atan2(py - cy, px - cx);
+  for (let k = 0; k < count; k++) {
+    const a = base + (k - (count - 1) / 2) * 0.28;
+    const ring = orbitAngle(e, Math.floor(Math.random() * 8));
+    angelSwords.push({ x: cx + Math.cos(ring) * 48, y: cy + Math.sin(ring) * 48,
+                       vx: Math.cos(a) * 4.5, vy: Math.sin(a) * 4.5, life: 300, color: descColor(e) });
+  }
+}
+
+function updateAngelSwords() {
+  for (const sw of angelSwords) {
+    sw.x += sw.vx; sw.y += sw.vy; sw.life--;                  // no wall check: passes through blocks
+    const hit = sw.x > player.x - 5 && sw.x < player.x + player.w + 5 &&
+                sw.y > player.y - 5 && sw.y < player.y + player.h + 5;
+    if (hit && player.invincibleFrames <= 0) {
+      player.hp -= 20;
+      player.invincibleFrames = 45;
+      player.vx = Math.sign(sw.vx) * 2.5;
+      player.vy = -2.5;
+      sw.life = 0;
+    }
+  }
+  angelSwords = angelSwords.filter(sw => sw.life > 0);
+}
+
+function drawAngelSword(x, y, angle, len, color) {           // blade points along `angle`
+  ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(len, 0); ctx.lineTo(-len * 0.3, -3); ctx.lineTo(-len * 0.3, 3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffd34d'; ctx.fillRect(-len * 0.3 - 2, -5, 3, 10);   // crossguard
+  ctx.restore();
+}
+
+function drawDescendant(e) {
+  const cx = e.x + e.w / 2, cy = e.y + e.h / 2, col = descColor(e);
+  for (let i = 0; i < 8; i++) {                               // the floating swords
+    const a = orbitAngle(e, i);
+    drawAngelSword(cx + Math.cos(a) * 48, cy + Math.sin(a) * 48, a, 16, col);
+  }
+  const flashing = e.state === 'windup' && Math.floor(e.t / 3) % 2;   // dash warning
+  ctx.fillStyle = e.hitFlash > 0 ? '#ffd0d0' : flashing ? '#ffe9a8' : '#ffffff';
+  ctx.fillRect(e.x, e.y, e.w, e.h);
+  ctx.strokeStyle = '#cfd8e8'; ctx.lineWidth = 2; ctx.strokeRect(e.x + 1, e.y + 1, e.w - 2, e.h - 2);
+  ctx.fillStyle = '#ffd34d';                                  // crown
+  ctx.beginPath();
+  ctx.moveTo(cx - 14, e.y - 2); ctx.lineTo(cx - 14, e.y - 14); ctx.lineTo(cx - 7, e.y - 7);
+  ctx.lineTo(cx, e.y - 16); ctx.lineTo(cx + 7, e.y - 7); ctx.lineTo(cx + 14, e.y - 14);
+  ctx.lineTo(cx + 14, e.y - 2); ctx.closePath(); ctx.fill();
+  if (e.immuneFlash > 0) {                                    // your hit did nothing: wrong damage type
+    ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.strokeRect(e.x - 4, e.y - 4, e.w + 8, e.h + 8);
+  }
+}
+
+function drawEnemy(e) {
+  if (e.kind === 'descendant') { drawDescendant(e); return; }
+  if (e.kind === 'eye' || e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet') { drawEye(e); return; }
+  const colors = { zombie: '#7f8c6f', slime: '#4aa3ff', green: '#3fe05a', boss: '#2bd4c0' };
+  
+  // Flash red when hit
+  ctx.fillStyle = e.hitFlash > 0 ? '#ff4d4d' : colors[e.kind];
+  ctx.fillRect(e.x, e.y, e.w, e.h);
+  ctx.fillStyle = '#000';                                       // eyes
+  ctx.fillRect(e.x + 3, e.y + 3, 2, 2);
+  ctx.fillRect(e.x + e.w - 5, e.y + 3, 2, 2);
+  if (e.kind === 'boss') {                                  // crown; its health bar is on the HUD
+    ctx.fillStyle = '#ffd34d'; ctx.fillRect(e.x + e.w / 2 - 8, e.y - 6, 16, 6);
+    return;
+  }
+  ctx.fillStyle = '#a22'; ctx.fillRect(e.x, e.y - 4, e.w, 2);   // health bar background
+  ctx.fillStyle = '#2c2'; ctx.fillRect(e.x, e.y - 4, e.w * e.hp / e.maxHp, 2);
+}
+
+function drawPlayer() {
+  // Blink while invincible.
+  const visible = player.invincibleFrames <= 0 || Math.floor(player.invincibleFrames / 4) % 2;
+  if (!visible) return;
+  for (const t of dashTrail) {                                                      // green dash afterimages
+    ctx.globalAlpha = t.life / 12 * 0.45; ctx.fillStyle = '#3ecf8e';
+    ctx.fillRect(t.x, t.y, player.w, player.h);
+  }
+  ctx.globalAlpha = 1;
+  if (hasWings) drawWings();
+  ctx.fillStyle = '#d9a066'; ctx.fillRect(player.x + 1, player.y, 10, 9);          // head
+  ctx.fillStyle = '#3a6ad0'; ctx.fillRect(player.x, player.y + 9, 12, 17);         // body
+  ctx.fillStyle = '#000';
+  ctx.fillRect(player.x + (player.facing > 0 ? 7 : 3), player.y + 3, 2, 2);        // eye
+  if (hasSlimeBoots) {                                                              // green slime boots
+    ctx.fillStyle = '#3ecf8e'; ctx.fillRect(player.x, player.y + 22, 5, 4); ctx.fillRect(player.x + 7, player.y + 22, 5, 4);
+  }
+}
+
+// Feathered wings behind the body; they flap while you are flying.
+function drawWings() {
+  const cx = player.x + player.w / 2, cy = player.y + 12;
+  const up = player.flying && Math.floor((hasInfiniteWings ? Date.now() / 60 : flightTime) / 4) % 2 ? -5 : 0;
+  ctx.fillStyle = hasInfiniteWings ? '#f3e8ff' : '#f4f4ff';
+  ctx.strokeStyle = hasInfiniteWings ? '#a855f7' : '#9aa6c8';
+  ctx.lineWidth = 1;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + side * 2, cy);
+    ctx.lineTo(cx + side * 16, cy - 8 + up);
+    ctx.lineTo(cx + side * 13, cy + 2 + up / 2);
+    ctx.lineTo(cx + side * 15, cy + 9);
+    ctx.lineTo(cx + side * 2, cy + 8);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+}
+function drawHeldItem() {
+  const px = player.x + player.w / 2, py = player.y + 8;
+  const angle = Math.atan2(mouseWorldY() - py, mouseWorldX() - px);
+  ctx.save();
+  ctx.translate(px, py);
+
+const held = heldItem();
+  if (held === 'sword') {
+    const swordAngle = swingFrames > 0 ? angle + (swingFrames - 7) / 7 * 1.4 : angle - 0.9;
+    ctx.rotate(swordAngle);
+    ctx.fillStyle = hasBossSword ? '#ff3344' : '#ccd'; // Red blade for Big Bad Sword
+    ctx.fillRect(4, -1.5, hasBossSword ? 28 : 22, 3);
+    ctx.fillStyle = '#a63'; ctx.fillRect(1, -2, 4, 4);
+    if (swingFrames > 0) {
+      ctx.strokeStyle = hasBossSword ? 'rgba(255, 60, 60, 0.6)' : 'rgba(255,255,255,.5)';
+      ctx.beginPath(); ctx.arc(0, 0, 30, -1.5, 1.4); ctx.stroke();
+    }
+  } else if (held === 'gun' || held === 'honza') {
+    ctx.rotate(angle);
+    if (Math.abs(angle) > Math.PI / 2) ctx.scale(1, -1);
+    ctx.fillStyle = hasBetterGun ? '#3ecf8e' : '#555'; // Slime green barrel for Slime Gun
+    ctx.fillRect(3, -2, 16, 4);
+    ctx.fillRect(3, 0, 5, 6);
+  }
+    else if (held && ITEMS[held].pick !== undefined) {   // pickaxes
+    ctx.rotate(angle + Math.PI / 2);   // sprite points up, so turn it to face the aim
+    drawSprite(PICK_SPRITES[held], -10, -21, 20, 20);
+  }
+  ctx.restore();
+}
+
+// White outline on the tile under the mouse when using the pickaxe or blocks.
+function drawTileCursor() {
+  const held = heldItem();
+  if (!held || held === 'sword' || held === 'silver_sword' || held === 'gun' || held === 'honza') return;
+  const tx = Math.floor(mouseWorldX() / TILE), ty = Math.floor(mouseWorldY() / TILE);
+  ctx.strokeStyle = 'rgba(255,255,255,.8)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(tx * TILE + 0.5, ty * TILE + 0.5, TILE - 1, TILE - 1);
+}
+
+function drawHud() {
+  // Health bar
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(10, 10, 160, 14);
+  ctx.fillStyle = '#e33';           ctx.fillRect(12, 12, 156 * Math.max(0, player.hp) / maxHp, 10);
+  ctx.fillStyle = '#fff'; ctx.font = '10px system-ui, sans-serif';
+  ctx.fillText(Math.ceil(Math.max(0, player.hp)) + '/' + maxHp, 14, 20);
+
+ // Flight meter (once you own the wings)
+  if (hasWings) {
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(176, 10, 80, 14);
+    ctx.fillStyle = hasInfiniteWings ? '#c77dff' : '#9fd0ff';
+    ctx.fillRect(178, 12, 76 * (hasInfiniteWings ? 1 : flightTime / FLIGHT_MAX), 10);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(hasInfiniteWings ? 'Inf Wings' : 'Wings', 262, 20);
+  }
+
+  // Dash meter (once you own the slime boots): fills back up while the dash recharges
+  if (hasSlimeBoots) {
+    const dx = hasWings ? 336 : 176;
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(dx, 10, 60, 14);
+    ctx.fillStyle = '#3ecf8e';        ctx.fillRect(dx + 2, 12, 56 * (1 - dashCooldown / DASH_COOLDOWN), 10);
+    ctx.fillStyle = '#fff';           ctx.fillText('Dash (Shift)', dx + 66, 20);
+  }
+
+  // Hotbar
+  ctx.font = '12px system-ui, sans-serif';
+  for (let i = 0; i < HOTBAR_SIZE; i++) {
+    drawSlot(10 + i * 48, 30, 44, hotbar[i], i === selectedSlot, CZ_SLOT_KEYS[i]);
+  }
+  ctx.font = '12px system-ui, sans-serif';
+
+  // Text with a shadow so it reads on any background
+  ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+  ctx.fillText('Kills ' + kills, 10, 92);
+  ctx.fillText('A/D move · W/Space jump · S drop through platforms · + ě š č ř ž ý á í é or wheel: slot · E: inventory & crafting · H: potion · Click: use · Right-click: place / open door',
+               10, uiH() - 12);
+  if (toastFrames > 0) {
+    toastFrames--;
+    ctx.font = '18px system-ui, sans-serif';
+    toastText.split('\n').forEach((line, i) =>
+      ctx.fillText(line, (uiW() - ctx.measureText(line).width) / 2, uiH() / 2 + i * 24));
+  }
+  ctx.shadowBlur = 0;
+}
+
+// =====================================================================
+// 10. GAME LOOP (fixed 60 updates per second, draw every frame)
+// =====================================================================
+let lastTime = performance.now(), accumulator = 0;
+function loop(now) {
+  accumulator += Math.min(100, now - lastTime);
+  lastTime = now;
+  while (accumulator >= 1000 / 60) { update(); accumulator -= 1000 / 60; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script></body></html>

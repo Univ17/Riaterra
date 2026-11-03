@@ -1,0 +1,6 @@
+{
+  "name": "Riaterra",
+  "description": "A 2D pixel sandbox adventure, mining, crafting, and boss progression game.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
