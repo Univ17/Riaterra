@@ -5,6 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: './',   // relative asset paths so the build works under a GitHub Pages sub-path (/Riaterra/)
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
