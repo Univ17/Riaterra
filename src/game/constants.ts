@@ -13,6 +13,8 @@ export const FLIGHT_MAX = 180;
 export const DASH_SPEED = 10;
 export const DASH_FRAMES = 16;
 export const DASH_COOLDOWN = 180;
+export const SLIME_KING_MAX_HP = 200;   // your max HP after defeating the King Slime
+export const EYE_MAX_HP = 300;          // your max HP after defeating the Big Bad Eye
 
 export const HOTBAR_SIZE = 10;
 export const CZ_SLOT_KEYS = ['+', 'ě', 'š', 'č', 'ř', 'ž', 'ý', 'á', 'í', 'é'];
