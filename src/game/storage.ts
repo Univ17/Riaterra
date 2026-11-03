@@ -1,6 +1,7 @@
 import { SaveData, ItemId, Tile } from './types';
 import { GameEngine } from './engine';
 import { WORLD_W, WORLD_H } from './constants';
+import { World } from './world';
 
 const SAVE_KEY = 'riaterra_save_v1';
 
@@ -20,6 +21,7 @@ export class StorageManager {
       const saveData: SaveData = {
         version: 1,
         timestamp: Date.now(),
+        seed: engine.world.seed,
         player: {
           hp: engine.player.hp,
           maxHp: engine.maxHp,
@@ -59,10 +61,22 @@ export class StorageManager {
       const data: SaveData = JSON.parse(raw);
       if (!data || !data.player) return false;
 
+      // Terrain: the world is generated from a seed, so rebuild the exact same world first and
+      // then re-apply the player's changes (mined / placed blocks) on top of it. Saves from before
+      // the seed was stored can't be matched to their terrain, so for those we keep the new world
+      // and the default spawn instead of applying changes to the wrong map.
+      const hasSeed = typeof data.seed === 'number';
+      if (hasSeed) {
+        engine.world = new World(data.seed);
+        engine.initialWorldData = new Uint8Array(engine.world.data);
+      }
+
       engine.player.hp = data.player.hp;
       engine.maxHp = data.player.maxHp || 100;
-      engine.player.x = data.player.x;
-      engine.player.y = data.player.y;
+      if (hasSeed) {
+        engine.player.x = data.player.x;
+        engine.player.y = data.player.y;
+      }
 
       if (data.unlocks) {
         engine.hasWings = !!data.unlocks.hasWings;
@@ -95,7 +109,7 @@ export class StorageManager {
         engine.inventory = { ...data.inventory } as any;
       }
 
-      if (data.worldDelta) {
+      if (hasSeed && data.worldDelta) {
         for (const [idxStr, tileType] of Object.entries(data.worldDelta)) {
           const idx = Number(idxStr);
           if (idx >= 0 && idx < engine.world.data.length) {

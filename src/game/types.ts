@@ -227,5 +227,6 @@ export interface SaveData {
   hotbar: (ItemId | null)[];
   storage?: (ItemId | null)[];
   inventory: Record<string, number>;
+  seed?: number; // terrain seed: the world is regenerated from this, then worldDelta is applied on top
   worldDelta?: Record<number, number>; // index -> tile type (if changed)
 }

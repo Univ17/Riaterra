@@ -150,6 +150,12 @@ export class GameEngine {
     if (StorageManager.hasSave()) {
       StorageManager.load(this);
     }
+
+    // Autosave only runs every 30s, so also save when the tab is closed or reloaded
+    // (otherwise the last bit of digging / building would be lost).
+    window.addEventListener('beforeunload', () => {
+      StorageManager.save(this);
+    });
   }
 
   public subscribe(fn: (snapshot: GameStateSnapshot) => void): () => void {
