@@ -24,8 +24,6 @@ import {
   DASH_SPEED,
   DASH_FRAMES,
   DASH_COOLDOWN,
-  SLIME_KING_MAX_HP,
-  EYE_MAX_HP,
   HOTBAR_SIZE,
   CZ_SLOT_KEYS,
   MINE_FRAMES,
@@ -1381,14 +1379,12 @@ export class GameEngine {
     // 1. King Slime -> 1 in 6 chance to drop Slime Gun & unlocks Tier 2
     if (e.kind === 'boss') {
       this.slimeKingDefeated = true;
-      if (this.maxHp < SLIME_KING_MAX_HP) this.maxHp = SLIME_KING_MAX_HP;
-      this.player.hp = this.maxHp;
       if (!this.hasBetterGun && Math.random() < 1 / 6) {
         this.hasBetterGun = true;
         this.addItem('gun');
-        this.showToast(`King Slime defeated!\nThe King Slime dropped the Slime Gun! Max HP raised to ${SLIME_KING_MAX_HP}.\nZombies now carry Occult Books.`);
+        this.showToast('King Slime defeated!\nThe King Slime dropped the Slime Gun! Zombies now carry Occult Books.');
       } else {
-        this.showToast(`King Slime defeated! Max HP raised to ${SLIME_KING_MAX_HP}.\nZombies now carry Occult Books.`);
+        this.showToast('King Slime defeated! Zombies now carry Occult Books.');
       }
       StorageManager.save(this);
     }
@@ -1430,15 +1426,15 @@ export class GameEngine {
     // 6. Big Bad Eye -> 1 in 6 chance to drop Big Bad Sword, +50 Max HP, and unlocks Golden Eyelets
     if (e.kind === 'eye') {
       this.eyeDefeated = true;
-      if (this.maxHp < EYE_MAX_HP) this.maxHp = EYE_MAX_HP;
+      if (this.maxHp < 150) this.maxHp = 150;
       this.player.hp = this.maxHp;
 
       if (this.itemCount('boss_sword') === 0 && Math.random() < 1 / 6) {
         this.hasBossSword = true;
         this.addItem('boss_sword', 1);
-        this.showToast(`Big Bad Eye defeated!\nThe Big Bad Eye dropped the Big Bad Sword!\nMax HP raised to ${EYE_MAX_HP}. Golden Eyelets now appear in the skies!`);
+        this.showToast('Big Bad Eye defeated!\nThe Big Bad Eye dropped the Big Bad Sword!\nMax HP raised to 150. Golden Eyelets now appear in the skies!');
       } else {
-        this.showToast(`Big Bad Eye defeated! Max HP raised to ${EYE_MAX_HP}.\nGolden Eyelets now appear in the skies!`);
+        this.showToast('Big Bad Eye defeated! Max HP raised to 150.\nGolden Eyelets now appear in the skies!');
       }
       StorageManager.save(this);
     }
