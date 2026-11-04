@@ -126,6 +126,18 @@ export class StorageManager {
     }
   }
 
+  // When the current save was written (ms since epoch), or null if there is none / it can't be read.
+  public static getSaveTimestamp(): number | null {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      return typeof data.timestamp === 'number' ? data.timestamp : null;
+    } catch {
+      return null;
+    }
+  }
+
   public static hasSave(): boolean {
     return !!localStorage.getItem(SAVE_KEY);
   }

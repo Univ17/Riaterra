@@ -53,6 +53,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ engine, onOpenInventory 
 
     // Keyboard handlers
     const onKeyDown = (e: KeyboardEvent) => {
+      if (engine.isPaused) return;   // the main menu is open
       const key = e.key.toLowerCase();
       engine.keys[key] = true;
 

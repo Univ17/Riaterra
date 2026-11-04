@@ -89,6 +89,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   const getItemStats = (id: ItemId | null) => {
     if (!id) return '';
     if (id === 'boss_sword') return '55 Melee Damage • Extended Reach';
+    if (id === 'angel_blade') return '60 Melee Damage • Boomerang, pierces everything';
     if (id === 'silver_sword') return '28 Melee Damage';
     if (id === 'sword') return '15 Melee Damage';
     if (id === 'gun') return snapshot.hasBetterGun ? 'High Velocity Rapid Slime Blaster' : '18 Ranged Damage';

@@ -24,8 +24,6 @@ import {
   DASH_SPEED,
   DASH_FRAMES,
   DASH_COOLDOWN,
-  SLIME_KING_MAX_HP,
-  EYE_MAX_HP,
   HOTBAR_SIZE,
   CZ_SLOT_KEYS,
   MINE_FRAMES,
@@ -96,6 +94,11 @@ export class GameEngine {
   public bullets: Bullet[] = [];
   public slimeBalls: SlimeBall[] = [];
   public angelSwords: AngelSword[] = [];
+  // The Angel Blade while it is in the air (only one at a time): flies out, then returns to the player.
+  public thrownBlade: {
+    x: number; y: number; vx: number; vy: number;
+    phase: 'out' | 'back'; frames: number; angle: number; hit: Set<Enemy>;
+  } | null = null;
   public debris: DebrisParticle[] = [];
   public floatingTexts: FloatingText[] = [];
   private nextFloatingTextId = 1;
@@ -723,6 +726,14 @@ export class GameEngine {
       this.swingFrames = 14;
       this.swingAlreadyHit.clear();
       this.cooldown = 18;
+    } else if (item === 'angel_blade') {
+      if (!this.thrownBlade) {                       // can only throw it when it is back in your hands
+        this.thrownBlade = {
+          x: px, y: py, vx: (aimX / aimLen) * 10, vy: (aimY / aimLen) * 10,
+          phase: 'out', frames: 0, angle: 0, hit: new Set(),
+        };
+        this.cooldown = 10;
+      }
     } else if (item === 'gun' || item === 'honza') {
       const speed = this.hasBetterGun ? 12 : 9;
       this.bullets.push({
@@ -887,6 +898,7 @@ export class GameEngine {
     this.updatePlayer();
     this.updateSwordHits();
     this.updateBullets();
+    this.updateThrownBlade();
     this.updateEnemies();
     this.updateSlimeBalls();
     this.updateAngelSwords();
@@ -1060,6 +1072,57 @@ export class GameEngine {
           e.vx = Math.sign(dx || 1) * 4;
           e.vy = -3.5;
         }
+      }
+    }
+  }
+
+  // Angel Blade: flies toward the cursor for ~28 frames, then homes back to the player.
+  // It passes through blocks and damages every enemy it touches (once on the way out, once on the way back).
+  // Counts as melee damage, so the Descendant only takes it while its swords are red.
+  public updateThrownBlade(): void {
+    const b = this.thrownBlade;
+    if (!b) return;
+    b.frames++;
+    b.angle += 0.5;
+    const px = this.player.x + this.player.w / 2;
+    const py = this.player.y + 12;
+
+    if (b.phase === 'out') {
+      b.x += b.vx;
+      b.y += b.vy;
+      if (b.frames >= 28) { // how far angel sword goes
+        b.phase = 'back';
+        b.hit.clear();                               // enemies can be hit again on the return trip
+      }
+    } else {
+      const dx = px - b.x;
+      const dy = py - b.y;
+      const d = Math.hypot(dx, dy) || 1;
+      if (d < 16 || b.frames > 220) {                // caught
+        this.thrownBlade = null;
+        this.cooldown = 6;
+        return;
+      }
+      b.x += (dx / d) * 13;
+      b.y += (dy / d) * 13;
+    }
+
+    for (const e of this.enemies) {
+      if (b.hit.has(e)) continue;
+      const nx = Math.max(e.x, Math.min(b.x, e.x + e.w));
+      const ny = Math.max(e.y, Math.min(b.y, e.y + e.h));
+      if (Math.hypot(b.x - nx, b.y - ny) > 14) continue;
+      b.hit.add(e);
+      if (e.kind === 'descendant' && e.mode !== 'melee') {
+        e.immuneFlash = 10;
+        continue;
+      }
+      e.hp -= 100; // angel sword damage
+      e.hitFlash = 8;
+      const isBoss = e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant';
+      if (!isBoss) {
+        e.vx = Math.sign(e.x + e.w / 2 - b.x || 1) * 3;
+        e.vy = -3;
       }
     }
   }
@@ -1380,16 +1443,21 @@ export class GameEngine {
 
     // 1. King Slime -> 1 in 6 chance to drop Slime Gun & unlocks Tier 2
     if (e.kind === 'boss') {
+      const first = !this.slimeKingDefeated;       // the "defeated" message only shows on the first kill
       this.slimeKingDefeated = true;
-      if (this.maxHp < SLIME_KING_MAX_HP) this.maxHp = SLIME_KING_MAX_HP;
+      const raised = this.maxHp < 200;
+      if (raised) this.maxHp = 200;                // reward: max HP 200
       this.player.hp = this.maxHp;
+      const lines: string[] = [];
+      if (first) lines.push('King Slime defeated!');
       if (!this.hasBetterGun && Math.random() < 1 / 6) {
         this.hasBetterGun = true;
         this.addItem('gun');
-        this.showToast(`King Slime defeated!\nThe King Slime dropped the Slime Gun! Max HP raised to ${SLIME_KING_MAX_HP}.\nZombies now carry Occult Books.`);
-      } else {
-        this.showToast(`King Slime defeated! Max HP raised to ${SLIME_KING_MAX_HP}.\nZombies now carry Occult Books.`);
+        lines.push('The King Slime dropped the Slime Gun!');
       }
+      if (raised) lines.push('Max HP raised to 200.');
+      if (first) lines.push('Zombies now carry Occult Books.');
+      if (lines.length > 0) this.showToast(lines.join('\n'));   // later kills: only drops are announced
       StorageManager.save(this);
     }
 
@@ -1427,19 +1495,23 @@ export class GameEngine {
       );
     }
 
-    // 6. Big Bad Eye -> 1 in 6 chance to drop Big Bad Sword, +50 Max HP, and unlocks Golden Eyelets
+    // 6. Big Bad Eye -> 1 in 6 chance to drop Big Bad Sword, sets Max HP to 300, and unlocks Golden Eyelets
     if (e.kind === 'eye') {
+      const first = !this.eyeDefeated;
       this.eyeDefeated = true;
-      if (this.maxHp < EYE_MAX_HP) this.maxHp = EYE_MAX_HP;
+      const raised = this.maxHp < 300;
+      if (raised) this.maxHp = 300;                // reward: max HP 300
       this.player.hp = this.maxHp;
-
+      const lines: string[] = [];
+      if (first) lines.push('Big Bad Eye defeated!');
       if (this.itemCount('boss_sword') === 0 && Math.random() < 1 / 6) {
         this.hasBossSword = true;
         this.addItem('boss_sword', 1);
-        this.showToast(`Big Bad Eye defeated!\nThe Big Bad Eye dropped the Big Bad Sword!\nMax HP raised to ${EYE_MAX_HP}. Golden Eyelets now appear in the skies!`);
-      } else {
-        this.showToast(`Big Bad Eye defeated! Max HP raised to ${EYE_MAX_HP}.\nGolden Eyelets now appear in the skies!`);
+        lines.push('The Big Bad Eye dropped the Big Bad Sword!');
       }
+      if (raised) lines.push('Max HP raised to 300.');
+      if (first) lines.push('Golden Eyelets now appear in the skies!');
+      if (lines.length > 0) this.showToast(lines.join('\n'));
       StorageManager.save(this);
     }
 
@@ -1455,9 +1527,20 @@ export class GameEngine {
 
     // 8. The Descendant defeated
     if (e.kind === 'descendant') {
+      const first = !this.descendantDefeated;
       this.descendantDefeated = true;
       this.angelSwords = [];
-      this.showToast('VICTORY! The Descendant has been defeated! The realm is at peace.');
+      const raised = this.maxHp < 400;
+      if (raised) this.maxHp = 400;                // reward: max HP 400
+      this.player.hp = this.maxHp;
+      const lines: string[] = [];
+      if (first) lines.push('VICTORY! The Descendant has been defeated! The realm is at peace.');
+      if (first) {                                   // guaranteed drop, first kill only
+        this.addItem('angel_blade', 1);
+        lines.push('The Descendant dropped the Angel Blade!');
+      }
+      if (raised) lines.push('Max HP raised to 400.');
+      if (lines.length > 0) this.showToast(lines.join('\n'));
       StorageManager.save(this);
     }
 
@@ -1471,6 +1554,7 @@ export class GameEngine {
     this.player.vx = 0;
     this.player.vy = 0;
     this.angelSwords = [];
+    this.thrownBlade = null;
     if (this.enemies.some((e) => e.kind === 'eye')) this.addItem('book');
     if (this.enemies.some((e) => e.kind === 'descendant')) this.addItem('relic');
     this.enemies = [];
@@ -1522,6 +1606,7 @@ export class GameEngine {
     this.bullets = [];
     this.slimeBalls = [];
     this.angelSwords = [];
+    this.thrownBlade = null;
     this.debris = [];
     this.floatingTexts = [];
 
@@ -1576,6 +1661,8 @@ export class GameEngine {
     for (const sw of this.angelSwords) {
       this.renderAngelSword(ctx, sw.x, sw.y, Math.atan2(sw.vy, sw.vx), 14, sw.color);
     }
+
+    this.renderThrownBlade(ctx);
 
     // Player & Held weapon
     this.renderPlayer(ctx);
@@ -1940,6 +2027,38 @@ export class GameEngine {
     }
   }
 
+  // White and golden sword, pointing along +x from the origin.
+  private drawAngelBlade(ctx: CanvasRenderingContext2D, len: number): void {
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#ffd34d';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(len, 0);
+    ctx.lineTo(6, -3.5);
+    ctx.lineTo(6, 3.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffd34d';
+    ctx.fillRect(3, -6, 3, 12);                      // crossguard
+    ctx.fillRect(-4, -1.5, 8, 3);                    // grip
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-6, -2.5, 3, 5);                    // pommel
+  }
+
+  private renderThrownBlade(ctx: CanvasRenderingContext2D): void {
+    const b = this.thrownBlade;
+    if (!b) return;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.translate(-12, 0);                           // spin around the middle of the blade
+    ctx.shadowColor = '#ffe9a8';
+    ctx.shadowBlur = 8;
+    this.drawAngelBlade(ctx, 26);
+    ctx.restore();
+  }
+
   private renderHeldItem(ctx: CanvasRenderingContext2D): void {
     const px = this.player.x + this.player.w / 2;
     const py = this.player.y + 8;
@@ -1967,6 +2086,11 @@ export class GameEngine {
         ctx.beginPath();
         ctx.arc(0, 0, bladeLen + 6, -1.5, 1.4);
         ctx.stroke();
+      }
+    } else if (held === 'angel_blade') {
+      if (!this.thrownBlade) {                       // it is in the air while thrown
+        ctx.rotate(angle);
+        this.drawAngelBlade(ctx, 26);
       }
     } else if (held === 'gun' || held === 'honza') {
       ctx.rotate(angle);
@@ -2001,6 +2125,7 @@ export class GameEngine {
       held === 'sword' ||
       held === 'silver_sword' ||
       held === 'boss_sword' ||
+      held === 'angel_blade' ||
       held === 'gun' ||
       held === 'honza'
     )

@@ -9,11 +9,53 @@ import { BossBar } from './components/BossBar';
 import { DebugPanel } from './components/DebugPanel';
 import { SaveControls } from './components/SaveControls';
 import { Toast } from './components/Toast';
+import { MainMenu } from './components/MainMenu';
+import { StorageManager } from './game/storage';
 
 export default function App() {
   const engine = useMemo(() => new GameEngine(), []);
   const [snapshot, setSnapshot] = useState<GameStateSnapshot>(() => engine.getSnapshot());
   const [isInventoryOpen, setIsInventoryOpen] = useState(false);
+  const [showMenu, setShowMenu] = useState(true);   // the main menu is shown first
+  const [hasStarted, setHasStarted] = useState(false);   // false until the player presses Play once
+
+  // The game is frozen while the menu is up; drop any held keys / mouse buttons so nothing sticks
+  useEffect(() => {
+    engine.isPaused = showMenu;
+    if (showMenu) {
+      engine.keys = {};
+      engine.leftDown = false;
+      engine.rightDown = false;
+    }
+  }, [engine, showMenu]);
+
+  const handlePlay = useCallback(() => {
+    setHasStarted(true);
+    setShowMenu(false);
+  }, []);
+
+  const handleNewGame = useCallback(() => {
+    engine.resetWorldAndProgress();
+    engine.isInventoryOpen = false;
+    setIsInventoryOpen(false);
+    setHasStarted(true);
+    setShowMenu(false);
+  }, [engine]);
+
+  const handleMenuSave = useCallback(() => {
+    StorageManager.save(engine);
+  }, [engine]);
+
+  // Esc opens the menu (when no inventory is open, and the menu isn't already up)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.repeat) return;
+      if (showMenu || isInventoryOpen) return;   // Esc closes the inventory first
+      setShowMenu(true);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showMenu, isInventoryOpen]);
 
   useEffect(() => {
     const unsubscribe = engine.subscribe((newSnap) => {
@@ -144,6 +186,11 @@ export default function App() {
           onDiscardSlot={handleDiscardSlot}
           onCraft={handleCraft}
         />
+      )}
+
+      {/* Main menu (first screen, and the pause menu on Esc) */}
+      {showMenu && (
+        <MainMenu inGame={hasStarted} onPlay={handlePlay} onNewGame={handleNewGame} onSave={handleMenuSave} />
       )}
     </div>
   );

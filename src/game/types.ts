@@ -17,6 +17,7 @@ export type ItemId =
   | 'sword'
   | 'silver_sword'
   | 'boss_sword'
+  | 'angel_blade'
   | 'gun'
   | 'honza'
   | 'pickaxe'
