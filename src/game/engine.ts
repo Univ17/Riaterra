@@ -29,16 +29,27 @@ import {
   MINE_FRAMES,
   DEBRIS_COLORS,
   CRACK_PIXELS,
-  TILE_SPRITES,
   TILE_COLORS,
-  PICK_SPRITES,
-  SPRITE_SHEET_SRC,
 } from './constants';
 import { ITEMS, getDropForTile, RECIPES } from './items';
 import { World } from './world';
 import { Physics } from './physics';
 import { StorageManager } from './storage';
-import { Assets } from './assets';
+import { Assets, Anchor } from './assets';
+import {
+  MONSTER_SPRITES,
+  HELD_SPRITES,
+  HELD_DEFAULT,
+  SWORD_ITEMS,
+  TILE_SPRITE_KEYS,
+  PLAYER_SPRITE,
+  BOOTS_SPRITE,
+  wingKeys,
+  BULLET_SPRITE,
+  HONZA_BULLET_SPRITE,
+  SLIME_BALL_SPRITE,
+  THROWN_BLADE_SPRITES,
+} from './spriteBindings';
 
 export class GameEngine {
   public world: World;
@@ -134,7 +145,6 @@ export class GameEngine {
   public autosaveTimer = 1800;
 
   // Textures
-  public spriteSheet: HTMLImageElement;
 
   // State synchronization listeners for React UI
   private listeners = new Set<(snapshot: GameStateSnapshot) => void>();
@@ -148,9 +158,6 @@ export class GameEngine {
     const spawnTileY = this.world.surface[Math.floor(WORLD_W / 2)] - 3;
     this.player.x = (WORLD_W / 2) * TILE;
     this.player.y = spawnTileY * TILE;
-
-    this.spriteSheet = new Image();
-    this.spriteSheet.src = SPRITE_SHEET_SRC;
 
     // Check for saved data in localStorage
     if (StorageManager.hasSave()) {
@@ -1053,7 +1060,7 @@ export class GameEngine {
       const dy = e.y + e.h / 2 - cy;
       const inFront = (dx * aimX + dy * aimY) / aimLen > -6;
 
-      const reach = this.swingItem === 'boss_sword' ? 80 : 46;
+      const reach = this.swingItem === 'boss_sword' ? 58 : 46;
       if (Math.hypot(dx, dy) < reach && inFront) {
         this.swingAlreadyHit.add(e);
         if (e.kind === 'descendant' && e.mode !== 'melee') {
@@ -1118,7 +1125,7 @@ export class GameEngine {
         e.immuneFlash = 10;
         continue;
       }
-      e.hp -= 80;
+      e.hp -= 60;
       e.hitFlash = 8;
       const isBoss = e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant';
       if (!isBoss) {
@@ -1411,7 +1418,7 @@ export class GameEngine {
         sw.y < this.player.y + this.player.h + 5;
 
       if (hit && this.player.invincibleFrames <= 0) {
-        this.player.hp -= 25;
+        this.player.hp -= 20;
         this.player.invincibleFrames = 45;
         this.player.vx = Math.sign(sw.vx) * 2.5;
         this.player.vy = -2.5;
@@ -1646,14 +1653,17 @@ export class GameEngine {
       this.renderEnemy(ctx, e);
     }
 
-    // Projectiles
-    ctx.fillStyle = '#ffd34d';
+    // Projectiles (sprites if present, canvas shapes otherwise)
     for (const b of this.bullets) {
+      const key = b.honza && Assets.has(HONZA_BULLET_SPRITE) ? HONZA_BULLET_SPRITE : BULLET_SPRITE;
+      if (Assets.draw(ctx, key, b.x, b.y, { angle: Math.atan2(b.vy, b.vx) })) continue;
+      ctx.fillStyle = '#ffd34d';
       ctx.fillRect(b.x - 1.5, b.y - 1.5, 3, 3);
     }
 
-    ctx.fillStyle = '#5be07a';
     for (const b of this.slimeBalls) {
+      if (Assets.draw(ctx, SLIME_BALL_SPRITE, b.x, b.y)) continue;
+      ctx.fillStyle = '#5be07a';
       ctx.beginPath();
       ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
       ctx.fill();
@@ -1699,6 +1709,10 @@ export class GameEngine {
         }
 
         if (tile === Tile.AIR) continue;
+
+        // Sprite first: src/assets/sprites/tiles/tile_<name>.png (or a tilesheet frame).
+        const tileKey = TILE_SPRITE_KEYS[tile];
+        if (tileKey && Assets.draw(ctx, tileKey, x * TILE, y * TILE, { anchor: 'topleft' })) continue;
 
         if (tile === Tile.PLATFORM) {
           ctx.fillStyle = '#a0693a';
@@ -1753,20 +1767,9 @@ export class GameEngine {
           continue;
         }
 
-        const spritePos = TILE_SPRITES[tile];
-        if (spritePos && this.spriteSheet.complete) {
-          ctx.drawImage(
-            this.spriteSheet,
-            spritePos[0] * 16,
-            spritePos[1] * 16,
-            16,
-            16,
-            x * TILE,
-            y * TILE,
-            TILE,
-            TILE
-          );
-        } else {
+        // Ore and silver without their own sprite: stone sprite + the canvas speckles below.
+        const baseKey = tile === Tile.ORE || tile === Tile.SILVER ? 'tile_stone' : undefined;
+        if (!(baseKey && Assets.draw(ctx, baseKey, x * TILE, y * TILE, { anchor: 'topleft' }))) {
           ctx.fillStyle = TILE_COLORS[tile] || '#8b5a2b';
           ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
           if (tile === Tile.GRASS) {
@@ -1820,39 +1823,64 @@ export class GameEngine {
     }
   }
 
+  // Draws a monster from MONSTER_SPRITES (spriteBindings.ts). Returns false if it has no sprite yet.
+  private drawMonsterSprite(ctx: CanvasRenderingContext2D, e: Enemy): boolean {
+    const binding = MONSTER_SPRITES[e.kind];
+    if (!binding) return false;
+    const wanted = typeof binding.sprite === 'function' ? binding.sprite(e) : binding.sprite;
+    const key = (Array.isArray(wanted) ? wanted : [wanted]).find((k) => Assets.has(k));
+    if (!key) return false;
+
+    const cx = e.x + e.w / 2;
+    const anchor: Anchor = binding.anchor ?? 'center';
+    const y = anchor === 'bottom' ? e.y + e.h : e.y + e.h / 2;
+    const movingRight = Math.abs(e.vx) > 0.1 ? e.vx > 0 : this.player.x + this.player.w / 2 > cx;
+    const flipX = binding.faces ? movingRight !== (binding.faces === 'right') : false;
+    const windup = e.state === 'windup' && Math.floor((e.t || 0) / 3) % 2 === 1;
+    const tint = e.hitFlash && e.hitFlash > 0 ? '#ff4d4d' : windup ? '#ff9a9a' : undefined;
+    return Assets.draw(ctx, key, cx, y, { anchor, flipX, tint });
+  }
+
   private renderEnemy(ctx: CanvasRenderingContext2D, e: Enemy): void {
     if (e.kind === 'descendant') {
       this.renderDescendant(ctx, e);
       return;
     }
-    if (e.kind === 'eye' || e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet') {
-      this.renderEye(ctx, e);
-      return;
+    const isEyeKind = e.kind === 'eye' || e.kind === 'eyelet' || e.kind === 'purple_eyelet' || e.kind === 'golden_eyelet';
+    const hasSprite = this.drawMonsterSprite(ctx, e);
+
+    if (!hasSprite) {
+      if (isEyeKind) {
+        this.renderEye(ctx, e); // draws its own health bar
+        return;
+      }
+
+      const colors: Record<string, string> = {
+        zombie: '#7f8c6f',
+        slime: '#4aa3ff',
+        green: '#3fe05a',
+        boss: '#2bd4c0',
+      };
+
+      ctx.fillStyle = e.hitFlash && e.hitFlash > 0 ? '#ff4d4d' : colors[e.kind] || '#fff';
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+
+      // Eyes
+      ctx.fillStyle = '#000';
+      ctx.fillRect(e.x + 3, e.y + 3, 2, 2);
+      ctx.fillRect(e.x + e.w - 5, e.y + 3, 2, 2);
+
+      if (e.kind === 'boss') {
+        // King Slime Crown
+        ctx.fillStyle = '#ffd34d';
+        ctx.fillRect(e.x + e.w / 2 - 8, e.y - 6, 16, 6);
+        return;
+      }
+    } else if (e.kind === 'boss' || e.kind === 'eye') {
+      return; // boss health is shown on the HUD bar
     }
 
-    const colors: Record<string, string> = {
-      zombie: '#7f8c6f',
-      slime: '#4aa3ff',
-      green: '#3fe05a',
-      boss: '#2bd4c0',
-    };
-
-    ctx.fillStyle = e.hitFlash && e.hitFlash > 0 ? '#ff4d4d' : colors[e.kind] || '#fff';
-    ctx.fillRect(e.x, e.y, e.w, e.h);
-
-    // Eyes
-    ctx.fillStyle = '#000';
-    ctx.fillRect(e.x + 3, e.y + 3, 2, 2);
-    ctx.fillRect(e.x + e.w - 5, e.y + 3, 2, 2);
-
-    if (e.kind === 'boss') {
-      // King Slime Crown
-      ctx.fillStyle = '#ffd34d';
-      ctx.fillRect(e.x + e.w / 2 - 8, e.y - 6, 16, 6);
-      return;
-    }
-
-    // Health bar above regular enemy
+    // Health bar above regular enemies
     ctx.fillStyle = '#a22';
     ctx.fillRect(e.x, e.y - 4, e.w, 2);
     ctx.fillStyle = '#2c2';
@@ -1986,53 +2014,62 @@ export class GameEngine {
     const visible = this.player.invincibleFrames <= 0 || Math.floor(this.player.invincibleFrames / 4) % 2 === 0;
     if (!visible) return;
 
+    const p = this.player;
+    const cx = p.x + p.w / 2;
+    const flipX = p.facing < 0; // the art faces right
+
     // Dash trail
     for (const t of this.dashTrail) {
       ctx.globalAlpha = (t.life / 12) * 0.45;
-      ctx.fillStyle = '#3ecf8e';
-      ctx.fillRect(t.x, t.y, this.player.w, this.player.h);
+      if (!Assets.draw(ctx, PLAYER_SPRITE, t.x + p.w / 2, t.y + p.h, { anchor: 'bottom', flipX, tint: '#3ecf8e', tintAlpha: 1 })) {
+        ctx.fillStyle = '#3ecf8e';
+        ctx.fillRect(t.x, t.y, p.w, p.h);
+      }
     }
     ctx.globalAlpha = 1;
 
     // Wings
     if (this.hasWings) {
-      const cx = this.player.x + this.player.w / 2;
-      const cy = this.player.y + 12;
-      const up =
-        this.player.flying && Math.floor((this.hasInfiniteWings ? Date.now() / 60 : this.flightTime) / 4) % 2 === 1
-          ? -5
-          : 0;
+      const cy = p.y + 12;
+      const flapping =
+        p.flying && Math.floor((this.hasInfiniteWings ? Date.now() / 60 : this.flightTime) / 4) % 2 === 1;
+      const up = flapping ? -5 : 0;
 
-      ctx.fillStyle = this.hasInfiniteWings ? '#f3e8ff' : '#f4f4ff';
-      ctx.strokeStyle = this.hasInfiniteWings ? '#a855f7' : '#9aa6c8';
-      ctx.lineWidth = 1;
+      const wingKey = wingKeys(this.hasInfiniteWings, flapping).find((k) => Assets.has(k));
+      if (!(wingKey && Assets.draw(ctx, wingKey, cx, cy))) {
+        ctx.fillStyle = this.hasInfiniteWings ? '#f3e8ff' : '#f4f4ff';
+        ctx.strokeStyle = this.hasInfiniteWings ? '#a855f7' : '#9aa6c8';
+        ctx.lineWidth = 1;
 
-      for (const side of [-1, 1]) {
-        ctx.beginPath();
-        ctx.moveTo(cx + side * 2, cy);
-        ctx.lineTo(cx + side * 16, cy - 8 + up);
-        ctx.lineTo(cx + side * 13, cy + 2 + up / 2);
-        ctx.lineTo(cx + side * 15, cy + 9);
-        ctx.lineTo(cx + side * 2, cy + 8);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
+        for (const side of [-1, 1]) {
+          ctx.beginPath();
+          ctx.moveTo(cx + side * 2, cy);
+          ctx.lineTo(cx + side * 16, cy - 8 + up);
+          ctx.lineTo(cx + side * 13, cy + 2 + up / 2);
+          ctx.lineTo(cx + side * 15, cy + 9);
+          ctx.lineTo(cx + side * 2, cy + 8);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
       }
     }
 
     // Body
-    ctx.fillStyle = '#d9a066';
-    ctx.fillRect(this.player.x + 1, this.player.y, 10, 9); // head
-    ctx.fillStyle = '#3a6ad0';
-    ctx.fillRect(this.player.x, this.player.y + 9, 12, 17); // body
-    ctx.fillStyle = '#000';
-    ctx.fillRect(this.player.x + (this.player.facing > 0 ? 7 : 3), this.player.y + 3, 2, 2); // eye
+    if (!Assets.draw(ctx, PLAYER_SPRITE, cx, p.y + p.h, { anchor: 'bottom', flipX })) {
+      ctx.fillStyle = '#d9a066';
+      ctx.fillRect(p.x + 1, p.y, 10, 9); // head
+      ctx.fillStyle = '#3a6ad0';
+      ctx.fillRect(p.x, p.y + 9, 12, 17); // body
+      ctx.fillStyle = '#000';
+      ctx.fillRect(p.x + (p.facing > 0 ? 7 : 3), p.y + 3, 2, 2); // eye
+    }
 
     // Slime boots
-    if (this.hasSlimeBoots) {
+    if (this.hasSlimeBoots && !Assets.draw(ctx, BOOTS_SPRITE, cx, p.y + p.h, { anchor: 'bottom', flipX })) {
       ctx.fillStyle = '#3ecf8e';
-      ctx.fillRect(this.player.x, this.player.y + 22, 5, 4);
-      ctx.fillRect(this.player.x + 7, this.player.y + 22, 5, 4);
+      ctx.fillRect(p.x, p.y + 22, 5, 4);
+      ctx.fillRect(p.x + 7, p.y + 22, 5, 4);
     }
   }
 
@@ -2059,13 +2096,50 @@ export class GameEngine {
     const b = this.thrownBlade;
     if (!b) return;
     ctx.save();
-    ctx.translate(b.x, b.y);
-    ctx.rotate(b.angle);
-    ctx.translate(-12, 0);                           // spin around the middle of the blade
     ctx.shadowColor = '#ffe9a8';
     ctx.shadowBlur = 8;
+    const key = THROWN_BLADE_SPRITES.find((k) => Assets.has(k));
+    if (key) {
+      Assets.draw(ctx, key, b.x, b.y, { angle: b.angle }); // spins around its center
+      ctx.restore();
+      return;
+    }
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.angle);
+    ctx.translate(-12, 0); // spin around the middle of the blade
     this.drawAngelBlade(ctx, 26);
     ctx.restore();
+  }
+
+  // Draws the held item from a sprite ('held_<id>' or '<id>'), aimed at the cursor. The grip sits at the hand.
+  // Returns false if the item has no sprite, so the canvas drawing is used.
+  private drawHeldSprite(ctx: CanvasRenderingContext2D, held: ItemId, angle: number): boolean {
+    const key = [`held_${held}`, held].find((k) => Assets.has(k));
+    if (!key) return false;
+    if (held === 'angel_blade' && this.thrownBlade) return true; // it is in the air
+
+    const bind = HELD_SPRITES[held] ?? HELD_DEFAULT;
+    const isSword = SWORD_ITEMS.includes(held);
+    const aim = isSword ? (this.swingFrames > 0 ? angle + ((this.swingFrames - 7) / 7) * 1.4 : angle - 0.9) : angle;
+    const nativeAngle = { right: 0, up: -Math.PI / 2, left: Math.PI, down: Math.PI / 2 }[bind.points];
+    const grip = { right: 'left', up: 'bottom', left: 'right', down: 'top' }[bind.points] as Anchor;
+    const scale = bind.scale ?? 1;
+
+    ctx.save();
+    ctx.rotate(aim - nativeAngle);
+    if (bind.flipWhenAimingLeft && Math.abs(angle) > Math.PI / 2) ctx.scale(1, -1);
+    Assets.draw(ctx, key, 0, 0, { anchor: grip, scale });
+    ctx.restore();
+
+    if (isSword && this.swingFrames > 0) {
+      const size = Assets.size(key)!;
+      const length = (bind.points === 'right' || bind.points === 'left' ? size.w : size.h) * scale;
+      ctx.strokeStyle = held === 'boss_sword' ? 'rgba(255, 60, 60, 0.7)' : 'rgba(255,255,255,.5)';
+      ctx.beginPath();
+      ctx.arc(0, 0, length + 6, -1.5, 1.4);
+      ctx.stroke();
+    }
+    return true;
   }
 
   private renderHeldItem(ctx: CanvasRenderingContext2D): void {
@@ -2077,13 +2151,19 @@ export class GameEngine {
     ctx.translate(px, py);
 
     const held = this.heldItem();
+    if (held && this.drawHeldSprite(ctx, held, angle)) {
+      ctx.restore();
+      return;
+    }
+
+    // Canvas fallbacks for items without a sprite
     if (held === 'sword' || held === 'silver_sword' || held === 'boss_sword') {
       const swordAngle = this.swingFrames > 0 ? angle + ((this.swingFrames - 7) / 7) * 1.4 : angle - 0.9;
       ctx.rotate(swordAngle);
 
       const isBigBad = held === 'boss_sword';
       const bladeColor = isBigBad ? '#ff3344' : held === 'silver_sword' ? '#cde' : '#ccd';
-      const bladeLen = isBigBad ? 40 : held === 'silver_sword' ? 24 : 22;
+      const bladeLen = isBigBad ? 28 : held === 'silver_sword' ? 24 : 22;
 
       ctx.fillStyle = bladeColor;
       ctx.fillRect(4, -1.5, bladeLen, 3);
@@ -2097,7 +2177,8 @@ export class GameEngine {
         ctx.stroke();
       }
     } else if (held === 'angel_blade') {
-      if (!this.thrownBlade) {                       // it is in the air while thrown
+      if (!this.thrownBlade) {
+        // it is in the air while thrown
         ctx.rotate(angle);
         this.drawAngelBlade(ctx, 26);
       }
@@ -2109,10 +2190,10 @@ export class GameEngine {
       ctx.fillRect(3, 0, 5, 6);
     } else if (held && ITEMS[held].pick !== undefined) {
       ctx.rotate(angle + Math.PI / 2);
-      const sprite = PICK_SPRITES[held];
-      if (sprite && this.spriteSheet.complete) {
-        ctx.drawImage(this.spriteSheet, sprite[0] * 16, sprite[1] * 16, 16, 16, -10, -21, 20, 20);
-      }
+      ctx.fillStyle = '#a63';
+      ctx.fillRect(-1, -16, 2, 16);
+      ctx.fillStyle = '#bbb';
+      ctx.fillRect(-6, -18, 12, 3);
     }
 
     ctx.restore();

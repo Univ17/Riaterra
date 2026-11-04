@@ -13,7 +13,12 @@
 //   3. Optional: add the key to SPRITE_PIVOTS to change the point the sprite is drawn around,
 //      or to SPRITE_FRAMES to cut one sprite out of a sprite sheet.
 //
-// Draw options: angle (radians), scale, flipX, alpha, tint (e.g. '#ffe9a8') and tintAlpha.
+// Draw options: angle (radians), scale, flipX, alpha, anchor, tint (e.g. '#ffe9a8') and tintAlpha.
+// A standalone PNG always wins over a SPRITE_FRAMES entry with the same key, so you can replace
+// any sheet frame later by dropping in a file with that key (e.g. tile_dirt.png).
+//
+// WHICH sprite each monster / item / tile / projectile uses lives in spriteBindings.ts.
+// A list of every key the game looks for is in src/assets/sprites/README.md.
 // =====================================================================
 
 // Every PNG under src/assets/sprites/ is picked up automatically (resolved to a URL by Vite).
@@ -35,6 +40,16 @@ export interface SpriteFrame {
 export const SPRITE_FRAMES: Record<string, SpriteFrame> = {
   descendant_sword_blue: { sheet: 'descendant_swords', x: 0, y: 0, w: 24, h: 9 },
   descendant_sword_red: { sheet: 'descendant_swords', x: 0, y: 9, w: 24, h: 9 },
+
+  // The original 3x3 tile sheet (tiles/tilesheet.png): tiles and held pickaxes.
+  tile_dirt: { sheet: 'tilesheet', x: 0, y: 0, w: 16, h: 16 },
+  tile_grass: { sheet: 'tilesheet', x: 16, y: 0, w: 16, h: 16 },
+  tile_stone: { sheet: 'tilesheet', x: 32, y: 0, w: 16, h: 16 },
+  tile_wood: { sheet: 'tilesheet', x: 0, y: 16, w: 16, h: 16 },
+  tile_leaves: { sheet: 'tilesheet', x: 16, y: 16, w: 16, h: 16 },
+  held_pickaxe: { sheet: 'tilesheet', x: 32, y: 16, w: 16, h: 16 },
+  held_stone_pickaxe: { sheet: 'tilesheet', x: 32, y: 32, w: 16, h: 16 },
+  held_silver_pickaxe: { sheet: 'tilesheet', x: 16, y: 32, w: 16, h: 16 },
 };
 
 // The point of the sprite (in sprite pixels) that is placed at the x,y you draw at.
@@ -43,7 +58,14 @@ export const SPRITE_PIVOTS: Record<string, [number, number]> = {
   descendant: [28, 41], // center of the round body (the halo sits above it)
 };
 
+// Which point of the sprite is placed at the x,y you draw at.
+//   'center' (default), 'bottom' (bottom-middle: for things standing on the ground),
+//   'top', 'left', 'right' (edge midpoints: for held items, the grip), 'topleft' (tiles).
+// Without an anchor the sprite's SPRITE_PIVOTS entry is used, or its center.
+export type Anchor = 'center' | 'bottom' | 'top' | 'left' | 'right' | 'topleft';
+
 export interface DrawOptions {
+  anchor?: Anchor;
   angle?: number;
   scale?: number;
   flipX?: boolean;
@@ -95,20 +117,39 @@ class AssetLoader {
     return this.resolve(key) !== null;
   }
 
+  // Size of a sprite in pixels (a sheet frame reports the frame size).
+  public size(key: string): { w: number; h: number } | null {
+    const s = this.resolve(key);
+    return s ? { w: s.w, h: s.h } : null;
+  }
+
   private resolve(key: string): Resolved | null {
+    const own = this.images.get(key); // a standalone file wins over a sheet frame
+    if (own) return { img: own, x: 0, y: 0, w: own.width, h: own.height };
     const frame = SPRITE_FRAMES[key];
-    const img = this.images.get(frame ? frame.sheet : key);
-    if (!img) return null;
-    if (frame) return { img, x: frame.x, y: frame.y, w: frame.w, h: frame.h };
-    return { img, x: 0, y: 0, w: img.width, h: img.height };
+    const sheet = frame ? this.images.get(frame.sheet) : undefined;
+    if (frame && sheet) return { img: sheet, x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+    return null;
+  }
+
+  private pivotFor(key: string, s: Resolved, anchor?: Anchor): [number, number] {
+    switch (anchor) {
+      case 'center': return [s.w / 2, s.h / 2];
+      case 'bottom': return [s.w / 2, s.h];
+      case 'top': return [s.w / 2, 0];
+      case 'left': return [0, s.h / 2];
+      case 'right': return [s.w, s.h / 2];
+      case 'topleft': return [0, 0];
+      default: return SPRITE_PIVOTS[key] ?? [s.w / 2, s.h / 2];
+    }
   }
 
   // Draws the sprite with its pivot at (x, y). Returns false if it is not available.
   public draw(ctx: CanvasRenderingContext2D, key: string, x: number, y: number, opts: DrawOptions = {}): boolean {
     const s = this.resolve(key);
     if (!s) return false;
-    const { angle = 0, scale = 1, flipX = false, alpha = 1, tint, tintAlpha = 0.55 } = opts;
-    const [px, py] = SPRITE_PIVOTS[key] ?? [s.w / 2, s.h / 2];
+    const { anchor, angle = 0, scale = 1, flipX = false, alpha = 1, tint, tintAlpha = 0.55 } = opts;
+    const [px, py] = this.pivotFor(key, s, anchor);
 
     ctx.save();
     ctx.imageSmoothingEnabled = false; // keep pixel art sharp
