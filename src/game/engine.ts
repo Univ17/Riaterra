@@ -38,6 +38,7 @@ import { ITEMS, getDropForTile, RECIPES } from './items';
 import { World } from './world';
 import { Physics } from './physics';
 import { StorageManager } from './storage';
+import { Assets } from './assets';
 
 export class GameEngine {
   public world: World;
@@ -1090,7 +1091,7 @@ export class GameEngine {
     if (b.phase === 'out') {
       b.x += b.vx;
       b.y += b.vy;
-      if (b.frames >= 28) { // how far angel sword goes
+      if (b.frames >= 28) {
         b.phase = 'back';
         b.hit.clear();                               // enemies can be hit again on the return trip
       }
@@ -1117,7 +1118,7 @@ export class GameEngine {
         e.immuneFlash = 10;
         continue;
       }
-      e.hp -= 100; // angel sword damage
+      e.hp -= 60;
       e.hitFlash = 8;
       const isBoss = e.kind === 'boss' || e.kind === 'eye' || e.kind === 'descendant';
       if (!isBoss) {
@@ -1922,25 +1923,29 @@ export class GameEngine {
     }
 
     const flashing = e.state === 'windup' && Math.floor((e.t || 0) / 3) % 2 === 1;
-    ctx.fillStyle = e.hitFlash && e.hitFlash > 0 ? '#ffd0d0' : flashing ? '#ffe9a8' : '#ffffff';
-    ctx.fillRect(e.x, e.y, e.w, e.h);
+    // Sprite (src/assets/sprites/monsters/descendant.png); falls back to the canvas drawing below.
+    const hitTint = e.hitFlash && e.hitFlash > 0 ? '#ff7070' : flashing ? '#ffe9a8' : undefined;
+    if (!Assets.draw(ctx, 'descendant', cx, cy, { tint: hitTint })) {
+      ctx.fillStyle = e.hitFlash && e.hitFlash > 0 ? '#ffd0d0' : flashing ? '#ffe9a8' : '#ffffff';
+      ctx.fillRect(e.x, e.y, e.w, e.h);
 
-    ctx.strokeStyle = '#cfd8e8';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(e.x + 1, e.y + 1, e.w - 2, e.h - 2);
+      ctx.strokeStyle = '#cfd8e8';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(e.x + 1, e.y + 1, e.w - 2, e.h - 2);
 
-    // Golden Crown
-    ctx.fillStyle = '#ffd34d';
-    ctx.beginPath();
-    ctx.moveTo(cx - 14, e.y - 2);
-    ctx.lineTo(cx - 14, e.y - 14);
-    ctx.lineTo(cx - 7, e.y - 7);
-    ctx.lineTo(cx, e.y - 16);
-    ctx.lineTo(cx + 7, e.y - 7);
-    ctx.lineTo(cx + 14, e.y - 14);
-    ctx.lineTo(cx + 14, e.y - 2);
-    ctx.closePath();
-    ctx.fill();
+      // Golden Crown
+      ctx.fillStyle = '#ffd34d';
+      ctx.beginPath();
+      ctx.moveTo(cx - 14, e.y - 2);
+      ctx.lineTo(cx - 14, e.y - 14);
+      ctx.lineTo(cx - 7, e.y - 7);
+      ctx.lineTo(cx, e.y - 16);
+      ctx.lineTo(cx + 7, e.y - 7);
+      ctx.lineTo(cx + 14, e.y - 14);
+      ctx.lineTo(cx + 14, e.y - 2);
+      ctx.closePath();
+      ctx.fill();
+    }
 
     if (e.immuneFlash && e.immuneFlash > 0) {
       ctx.strokeStyle = col;
@@ -1957,6 +1962,10 @@ export class GameEngine {
     len: number,
     color: string
   ): void {
+    // Sprite sheet frames: blue sword = ranged phase, red sword = melee phase. The art points left.
+    const spriteKey = color === '#6aa0ff' ? 'descendant_sword_blue' : 'descendant_sword_red';
+    if (Assets.draw(ctx, spriteKey, x, y, { angle: angle + Math.PI })) return;
+
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle);
