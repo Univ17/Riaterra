@@ -19,3 +19,20 @@ canvas {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
 }
+
+/* ---- Main menu ---- */
+@keyframes menu-cloud-drift {
+  from { transform: translateX(-30vw); }
+  to   { transform: translateX(130vw); }
+}
+@keyframes menu-title-bob {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50%      { transform: translateY(-8px) rotate(1deg); }
+}
+@keyframes menu-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.menu-cloud { animation: menu-cloud-drift linear infinite; }
+.menu-title { animation: menu-title-bob 4s ease-in-out infinite; }
+.menu-blink { animation: menu-blink 1s steps(2, end) infinite; }

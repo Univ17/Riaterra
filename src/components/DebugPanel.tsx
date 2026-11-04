@@ -39,6 +39,13 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({ engine }) => {
       },
     },
     {
+      label: 'Angel Blade',
+      action: () => {
+        engine.addItem('angel_blade', 1);
+        engine.showToast('Angel Blade granted!');
+      },
+    },
+    {
       label: 'Infinite Wings',
       action: () => {
         engine.hasWings = true;
